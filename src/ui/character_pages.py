@@ -15,6 +15,7 @@ from src.charts.account_charts import (
     queue_health_chart,
     readiness_chart,
     sp_snapshot_history_chart,
+    sp_velocity_chart,
 )
 from src.data.repositories import (
     add_account,
@@ -58,10 +59,12 @@ from src.services.character_service import (
 )
 from src.services.esi_sync_service import import_authorized_character, sync_character_from_token_row
 from src.services.sp_tracking_service import (
+    analytics_dataframe,
     alerts_dataframe,
     milestones_dataframe,
     snapshot_history_dataframe,
     snapshot_trends_by_character,
+    sp_progress_analytics_by_character,
     sp_milestones,
     sp_tracking_dataframe,
     summarize_sp_tracking,
@@ -96,12 +99,18 @@ def characters_page(
     sp_summary = summarize_sp_tracking(progress)
     progress_df = progress_to_dataframe(progress)
     snapshots_by_character = {
-        row.character_id: list_sp_snapshots(connection, character_id=row.character_id, limit=2)
+        row.character_id: list_sp_snapshots(connection, character_id=row.character_id, limit=200)
         for row in progress
     }
     snapshot_trends = snapshot_trends_by_character(progress, snapshots_by_character)
+    progress_analytics = sp_progress_analytics_by_character(progress, snapshots_by_character)
+    analytics_df = analytics_dataframe(progress_analytics)
     tracking_df = sp_tracking_dataframe(progress, snapshot_trends=snapshot_trends)
-    alerts = tracking_alerts(progress, snapshot_trends=snapshot_trends)
+    alerts = tracking_alerts(
+        progress,
+        snapshot_trends=snapshot_trends,
+        progress_analytics=progress_analytics,
+    )
     milestones = sp_milestones(progress)
 
     section_header(
@@ -119,6 +128,18 @@ def characters_page(
         _attention_board(alerts)
         section_header("Next SP Milestones", "Nearest 500k SP boundaries.")
         _milestone_board(milestones)
+
+    analytics_left, analytics_right = st.columns([1.15, 1], gap="large")
+    with analytics_left:
+        section_header("SP Velocity", "7 day observed SP/day vs expected rate.")
+        st.plotly_chart(
+            sp_velocity_chart(analytics_df),
+            width="stretch",
+            key="sp_velocity_chart",
+        )
+    with analytics_right:
+        section_header("Progression Analytics", "7d/30d SP gain and queue coverage.")
+        _sp_analytics_table(analytics_df)
 
     chart_left, chart_right = st.columns(2, gap="large")
     with chart_left:
@@ -397,6 +418,66 @@ def _farm_readiness_table(progress: list[CharacterProgress]) -> None:
             "Days To Next Injector": st.column_config.NumberColumn(
                 "Days To Next Injector",
                 format="%.2f",
+            ),
+        },
+    )
+
+
+def _sp_analytics_table(analytics_df: pd.DataFrame) -> None:
+    if analytics_df.empty:
+        st.info("No SP analytics available yet.")
+        return
+
+    visible_columns = [
+        "Group",
+        "Account",
+        "Character",
+        "Snapshots",
+        "Queue Coverage %",
+        "7D SP Gain",
+        "7D Observed SP/day",
+        "7D Delta SP/day",
+        "7D Data Coverage %",
+        "30D SP Gain",
+        "30D Observed SP/day",
+        "30D Delta SP/day",
+        "30D Data Coverage %",
+    ]
+    st.dataframe(
+        analytics_df[visible_columns],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Snapshots": st.column_config.NumberColumn("Snapshots", format="%d"),
+            "Queue Coverage %": st.column_config.NumberColumn(
+                "Queue Coverage %",
+                format="%.0f%%",
+            ),
+            "7D SP Gain": st.column_config.NumberColumn("7D SP Gain", format="%d SP"),
+            "7D Observed SP/day": st.column_config.NumberColumn(
+                "7D Observed SP/day",
+                format="%.0f SP",
+            ),
+            "7D Delta SP/day": st.column_config.NumberColumn(
+                "7D Delta SP/day",
+                format="%.0f SP",
+            ),
+            "7D Data Coverage %": st.column_config.NumberColumn(
+                "7D Data Coverage %",
+                format="%.0f%%",
+            ),
+            "30D SP Gain": st.column_config.NumberColumn("30D SP Gain", format="%d SP"),
+            "30D Observed SP/day": st.column_config.NumberColumn(
+                "30D Observed SP/day",
+                format="%.0f SP",
+            ),
+            "30D Delta SP/day": st.column_config.NumberColumn(
+                "30D Delta SP/day",
+                format="%.0f SP",
+            ),
+            "30D Data Coverage %": st.column_config.NumberColumn(
+                "30D Data Coverage %",
+                format="%.0f%%",
             ),
         },
     )

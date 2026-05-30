@@ -97,6 +97,39 @@ def queue_health_chart(sp_tracking_df: pd.DataFrame) -> go.Figure:
     return style_chart(fig)
 
 
+def sp_velocity_chart(analytics_df: pd.DataFrame) -> go.Figure:
+    """Build observed vs expected SP/day chart by character."""
+
+    if analytics_df.empty:
+        return style_chart(go.Figure())
+
+    display = analytics_df.copy()
+    display["7D Observed SP/day"] = display["7D Observed SP/day"].fillna(0)
+    display["7D Expected SP/day"] = display["7D Expected SP/day"].fillna(0)
+    display["Label"] = display["Account"] + " / " + display["Character"]
+    display = display.sort_values("7D Observed SP/day", ascending=False)
+    fig = go.Figure()
+    fig.add_bar(
+        x=display["Label"],
+        y=display["7D Observed SP/day"],
+        name="7D Observed",
+        marker_color="#22D3EE",
+    )
+    fig.add_bar(
+        x=display["Label"],
+        y=display["7D Expected SP/day"],
+        name="Expected",
+        marker_color="#64748B",
+        opacity=0.65,
+    )
+    fig.update_layout(
+        barmode="group",
+        xaxis_title="Character",
+        yaxis_title="SP/day",
+    )
+    return style_chart(fig)
+
+
 def sp_snapshot_history_chart(history_df: pd.DataFrame) -> go.Figure:
     """Build SP snapshot history chart for one character."""
 

@@ -17,3 +17,5 @@ data/*.sqlite3
 .streamlit/secrets.toml
 logs/
 *.lnk
+
+AGENTS.md

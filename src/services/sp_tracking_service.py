@@ -61,6 +61,32 @@ class SpSnapshotTrend:
     snapshot_age_hours: float | None
 
 
+@dataclass(frozen=True)
+class SpWindowMetric:
+    window_days: int
+    sp_gained: int | None
+    hours_observed: float | None
+    observed_sp_per_day: float | None
+    expected_sp_per_day: float
+    training_delta_sp_per_day: float | None
+    window_coverage_pct: float
+
+
+@dataclass(frozen=True)
+class SpProgressAnalytics:
+    group_name: str
+    account_name: str
+    character_name: str
+    character_id: int
+    snapshot_count: int
+    latest_sp: int | None
+    latest_at: str | None
+    queue_coverage_hours: float
+    queue_coverage_pct: float
+    seven_day: SpWindowMetric
+    thirty_day: SpWindowMetric
+
+
 def summarize_sp_tracking(
     progress: list[CharacterProgress],
     *,
@@ -161,6 +187,7 @@ def tracking_alerts(
     min_trend_hours: float = 1,
     low_training_ratio: float = 0.85,
     snapshot_trends: dict[int, SpSnapshotTrend] | None = None,
+    progress_analytics: dict[int, SpProgressAnalytics] | None = None,
 ) -> list[TrackingAlert]:
     """Return actionable SP tracking alerts."""
 
@@ -290,6 +317,46 @@ def tracking_alerts(
                     )
                 )
 
+        analytics = _analytics_for(row, progress_analytics)
+        if analytics:
+            if 0 <= analytics.queue_coverage_pct < 100:
+                alerts.append(
+                    _alert(
+                        row,
+                        severity="warning" if analytics.queue_coverage_pct == 0 else "info",
+                        category="Queue",
+                        message=(
+                            "Queue coverage is below the 24 hour target "
+                            f"({analytics.queue_coverage_pct:.0f}%)."
+                        ),
+                        action="Extend the training queue before it runs out.",
+                        due_at=row.queue_ends_at,
+                    )
+                )
+
+            seven_day = analytics.seven_day
+            if (
+                seven_day.observed_sp_per_day is not None
+                and seven_day.window_coverage_pct >= 25
+                and seven_day.expected_sp_per_day > 0
+                and seven_day.observed_sp_per_day
+                < seven_day.expected_sp_per_day * low_training_ratio
+            ):
+                alerts.append(
+                    _alert(
+                        row,
+                        severity="warning",
+                        category="Training",
+                        message=(
+                            "7 day observed SP/day is below expected "
+                            f"({seven_day.observed_sp_per_day:,.0f} vs "
+                            f"{seven_day.expected_sp_per_day:,.0f})."
+                        ),
+                        action="Review Omega state, implants, attributes, and queue continuity.",
+                        due_at=analytics.latest_at,
+                    )
+                )
+
     severity_rank = {"critical": 0, "warning": 1, "info": 2}
     return sorted(
         alerts,
@@ -300,6 +367,63 @@ def tracking_alerts(
             alert.account_name,
             alert.character_name,
         ),
+    )
+
+
+def sp_progress_analytics_by_character(
+    progress: list[CharacterProgress],
+    snapshots_by_character: dict[int, list[dict[str, object]]],
+    *,
+    now: datetime | None = None,
+    queue_target_hours: float = 24,
+) -> dict[int, SpProgressAnalytics]:
+    """Return SP progression analytics keyed by local character ID."""
+
+    current_time = now or datetime.now(timezone.utc)
+    return {
+        row.character_id: sp_progress_analytics(
+            row,
+            snapshots_by_character.get(row.character_id, []),
+            now=current_time,
+            queue_target_hours=queue_target_hours,
+        )
+        for row in progress
+    }
+
+
+def sp_progress_analytics(
+    row: CharacterProgress,
+    snapshots: list[dict[str, object]],
+    *,
+    now: datetime | None = None,
+    queue_target_hours: float = 24,
+) -> SpProgressAnalytics:
+    """Calculate 7 day, 30 day, and queue coverage analytics for one character."""
+
+    current_time = now or datetime.now(timezone.utc)
+    ordered = sorted(snapshots, key=lambda snapshot: str(snapshot["timestamp"]))
+    latest = ordered[-1] if ordered else None
+    latest_sp = int(latest["total_sp"]) if latest else None
+    latest_at = str(latest["timestamp"]) if latest else None
+    queue_hours = _queue_coverage_hours(row, now=current_time)
+    queue_coverage_pct = (
+        min(max(queue_hours / queue_target_hours, 0), 1) * 100
+        if queue_target_hours > 0
+        else 0
+    )
+
+    return SpProgressAnalytics(
+        group_name=row.group_name,
+        account_name=row.account_name,
+        character_name=row.character_name,
+        character_id=row.character_id,
+        snapshot_count=len(ordered),
+        latest_sp=latest_sp,
+        latest_at=latest_at,
+        queue_coverage_hours=queue_hours,
+        queue_coverage_pct=queue_coverage_pct,
+        seven_day=_window_metric(row, ordered, window_days=7),
+        thirty_day=_window_metric(row, ordered, window_days=30),
     )
 
 
@@ -512,6 +636,34 @@ def trends_dataframe(trends: dict[int, SpSnapshotTrend]) -> pd.DataFrame:
     return pd.DataFrame([trend.__dict__ for trend in trends.values()])
 
 
+def analytics_dataframe(analytics: dict[int, SpProgressAnalytics]) -> pd.DataFrame:
+    rows = []
+    for item in analytics.values():
+        rows.append(
+            {
+                "Group": item.group_name,
+                "Account": item.account_name,
+                "Character": item.character_name,
+                "Snapshots": item.snapshot_count,
+                "Latest SP": item.latest_sp,
+                "Latest Snapshot": item.latest_at,
+                "Queue Coverage Hours": item.queue_coverage_hours,
+                "Queue Coverage %": item.queue_coverage_pct,
+                "7D SP Gain": item.seven_day.sp_gained,
+                "7D Observed SP/day": item.seven_day.observed_sp_per_day,
+                "7D Expected SP/day": item.seven_day.expected_sp_per_day,
+                "7D Delta SP/day": item.seven_day.training_delta_sp_per_day,
+                "7D Data Coverage %": item.seven_day.window_coverage_pct,
+                "30D SP Gain": item.thirty_day.sp_gained,
+                "30D Observed SP/day": item.thirty_day.observed_sp_per_day,
+                "30D Expected SP/day": item.thirty_day.expected_sp_per_day,
+                "30D Delta SP/day": item.thirty_day.training_delta_sp_per_day,
+                "30D Data Coverage %": item.thirty_day.window_coverage_pct,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def alerts_dataframe(alerts: list[TrackingAlert]) -> pd.DataFrame:
     return pd.DataFrame([alert.__dict__ for alert in alerts])
 
@@ -550,3 +702,85 @@ def _trend_for(
     if snapshot_trends and row.character_id in snapshot_trends:
         return snapshot_trends[row.character_id]
     return snapshot_trend(row, [], now=now)
+
+
+def _analytics_for(
+    row: CharacterProgress,
+    progress_analytics: dict[int, SpProgressAnalytics] | None,
+) -> SpProgressAnalytics | None:
+    if progress_analytics and row.character_id in progress_analytics:
+        return progress_analytics[row.character_id]
+    return None
+
+
+def _window_metric(
+    row: CharacterProgress,
+    ordered_snapshots: list[dict[str, object]],
+    *,
+    window_days: int,
+) -> SpWindowMetric:
+    expected_sp_per_day = row.training_rate_sp_min * 60 * 24
+    if len(ordered_snapshots) < 2:
+        return SpWindowMetric(
+            window_days=window_days,
+            sp_gained=None,
+            hours_observed=None,
+            observed_sp_per_day=None,
+            expected_sp_per_day=expected_sp_per_day,
+            training_delta_sp_per_day=None,
+            window_coverage_pct=0,
+        )
+
+    latest = ordered_snapshots[-1]
+    latest_time = parse_datetime(str(latest["timestamp"]))
+    cutoff = latest_time - pd.Timedelta(days=window_days).to_pytimedelta()
+    baseline = _baseline_snapshot_for_window(ordered_snapshots[:-1], cutoff=cutoff)
+    baseline_time = parse_datetime(str(baseline["timestamp"]))
+    hours_observed = (latest_time - baseline_time).total_seconds() / 3600
+    if hours_observed <= 0:
+        return SpWindowMetric(
+            window_days=window_days,
+            sp_gained=None,
+            hours_observed=None,
+            observed_sp_per_day=None,
+            expected_sp_per_day=expected_sp_per_day,
+            training_delta_sp_per_day=None,
+            window_coverage_pct=0,
+        )
+
+    sp_gained = int(latest["total_sp"]) - int(baseline["total_sp"])
+    observed_sp_per_day = sp_gained / hours_observed * 24
+    return SpWindowMetric(
+        window_days=window_days,
+        sp_gained=sp_gained,
+        hours_observed=hours_observed,
+        observed_sp_per_day=observed_sp_per_day,
+        expected_sp_per_day=expected_sp_per_day,
+        training_delta_sp_per_day=observed_sp_per_day - expected_sp_per_day,
+        window_coverage_pct=min(hours_observed / (window_days * 24), 1) * 100,
+    )
+
+
+def _baseline_snapshot_for_window(
+    snapshots: list[dict[str, object]],
+    *,
+    cutoff: datetime,
+) -> dict[str, object]:
+    older_or_equal = [
+        snapshot
+        for snapshot in snapshots
+        if parse_datetime(str(snapshot["timestamp"])) <= cutoff
+    ]
+    if older_or_equal:
+        return max(older_or_equal, key=lambda snapshot: str(snapshot["timestamp"]))
+    return snapshots[0]
+
+
+def _queue_coverage_hours(
+    row: CharacterProgress,
+    *,
+    now: datetime,
+) -> float:
+    if row.training_rate_sp_min <= 0 or not row.queue_ends_at:
+        return 0
+    return max((parse_datetime(row.queue_ends_at) - now).total_seconds() / 3600, 0)

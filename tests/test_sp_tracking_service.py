@@ -4,12 +4,15 @@ from src.calculations.assumptions import load_assumptions
 from src.data.database import connect, initialize_database, seed_demo_data
 from src.services.character_service import list_character_progress
 from src.services.sp_tracking_service import (
+    analytics_dataframe,
     alerts_dataframe,
     milestones_dataframe,
     next_sp_milestone,
     queue_health,
     snapshot_trend,
     snapshot_trends_by_character,
+    sp_progress_analytics,
+    sp_progress_analytics_by_character,
     sp_milestones,
     sp_tracking_dataframe,
     summarize_sp_tracking,
@@ -197,6 +200,135 @@ def test_tracking_alerts_warn_when_snapshots_show_no_sp_gain() -> None:
     assert any(
         alert.category == "Training"
         and alert.message == "No SP gain was observed between the last two snapshots."
+        for alert in alerts
+    )
+
+
+def test_sp_progress_analytics_calculates_7d_and_30d_windows() -> None:
+    connection = connect(":memory:")
+    initialize_database(connection)
+    seed_demo_data(connection)
+    progress = list_character_progress(
+        connection,
+        load_assumptions().training,
+        now=datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc),
+    )
+    character = progress[0]
+
+    analytics = sp_progress_analytics(
+        character,
+        [
+            {
+                "timestamp": "2026-04-30T00:00:00+00:00",
+                "total_sp": 3_056_000,
+                "source": "ESI",
+                "notes": "",
+            },
+            {
+                "timestamp": "2026-05-23T00:00:00+00:00",
+                "total_sp": 4_546_400,
+                "source": "ESI",
+                "notes": "",
+            },
+            {
+                "timestamp": "2026-05-30T00:00:00+00:00",
+                "total_sp": 5_000_000,
+                "source": "ESI",
+                "notes": "",
+            },
+        ],
+        now=datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert analytics.snapshot_count == 3
+    assert analytics.seven_day.sp_gained == 453_600
+    assert analytics.seven_day.observed_sp_per_day == 64_800
+    assert analytics.seven_day.window_coverage_pct == 100
+    assert analytics.thirty_day.sp_gained == 1_944_000
+    assert analytics.thirty_day.observed_sp_per_day == 64_800
+    assert analytics.thirty_day.window_coverage_pct == 100
+    assert analytics.queue_coverage_pct == 100
+
+
+def test_analytics_dataframe_flattens_window_metrics() -> None:
+    connection = connect(":memory:")
+    initialize_database(connection)
+    seed_demo_data(connection)
+    progress = list_character_progress(
+        connection,
+        load_assumptions().training,
+        now=datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc),
+    )
+    character = progress[0]
+    analytics = sp_progress_analytics_by_character(
+        [character],
+        {
+            character.character_id: [
+                {
+                    "timestamp": "2026-05-23T00:00:00+00:00",
+                    "total_sp": 4_546_400,
+                    "source": "ESI",
+                    "notes": "",
+                },
+                {
+                    "timestamp": "2026-05-30T00:00:00+00:00",
+                    "total_sp": 5_000_000,
+                    "source": "ESI",
+                    "notes": "",
+                },
+            ]
+        },
+        now=datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc),
+    )
+
+    df = analytics_dataframe(analytics)
+
+    assert len(df) == 1
+    assert df.iloc[0]["7D SP Gain"] == 453_600
+    assert df.iloc[0]["7D Observed SP/day"] == 64_800
+    assert "30D Data Coverage %" in df.columns
+
+
+def test_tracking_alerts_warn_when_7d_training_underperforms() -> None:
+    connection = connect(":memory:")
+    initialize_database(connection)
+    seed_demo_data(connection)
+    progress = list_character_progress(
+        connection,
+        load_assumptions().training,
+        now=datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc),
+    )
+    character = progress[0]
+    analytics = sp_progress_analytics_by_character(
+        [character],
+        {
+            character.character_id: [
+                {
+                    "timestamp": "2026-05-23T00:00:00+00:00",
+                    "total_sp": 4_900_000,
+                    "source": "ESI",
+                    "notes": "",
+                },
+                {
+                    "timestamp": "2026-05-30T00:00:00+00:00",
+                    "total_sp": 5_000_000,
+                    "source": "ESI",
+                    "notes": "",
+                },
+            ]
+        },
+        now=datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc),
+    )
+
+    alerts = tracking_alerts(
+        [character],
+        now=datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc),
+        progress_analytics=analytics,
+    )
+
+    assert any(
+        alert.category == "Training"
+        and alert.message.startswith("7 day observed SP/day is below expected")
         for alert in alerts
     )
 
