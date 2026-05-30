@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from html import escape
+from textwrap import dedent
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +19,8 @@ def app_header(
 
     updated_text = last_updated or "manual data"
     st.markdown(
-        f"""
+        dedent(
+            f"""
         <div class="eve-topbar">
             <div class="eve-topbar-left">
                 <div class="eve-menu-mark">&#9776;</div>
@@ -33,7 +35,8 @@ def app_header(
                 <span class="eve-updated">Last updated: {escape(updated_text)}</span>
             </div>
         </div>
-        """,
+        """
+        ).strip(),
         unsafe_allow_html=True,
     )
 
@@ -47,12 +50,14 @@ def section_header(title: str, subtitle: str | None = None) -> None:
         else ""
     )
     st.markdown(
-        f"""
+        dedent(
+            f"""
         <div class="eve-section-heading">
             <div class="eve-section-title">{escape(title)}</div>
             {subtitle_html}
         </div>
-        """,
+        """
+        ).strip(),
         unsafe_allow_html=True,
     )
 
@@ -79,17 +84,20 @@ def detail_panel(
     """Render a compact key/value detail panel."""
 
     badge_html = status_badge(badge, tone=badge_tone) if badge else ""
-    row_html = "\n".join(
-        f"""
+    row_html = "".join(
+        dedent(
+            f"""
         <div class="eve-detail-row">
             <span>{escape(label)}</span>
             <strong>{escape(value)}</strong>
         </div>
         """
+        ).strip()
         for label, value in rows
     )
     st.markdown(
-        f"""
+        dedent(
+            f"""
         <div class="eve-detail-panel">
             <div class="eve-detail-heading">
                 <div>{escape(title)}</div>
@@ -99,7 +107,8 @@ def detail_panel(
                 {row_html}
             </div>
         </div>
-        """,
+        """
+        ).strip(),
         unsafe_allow_html=True,
     )
 
@@ -116,7 +125,8 @@ def metric_card(
 
     icon_html = f'<div class="eve-kpi-icon">{escape(icon)}</div>' if icon else ""
     st.markdown(
-        f"""
+        dedent(
+            f"""
         <div class="eve-kpi {escape(tone)}">
             {icon_html}
             <div class="eve-kpi-copy">
@@ -125,7 +135,8 @@ def metric_card(
                 <div class="eve-kpi-delta">{escape(delta)}</div>
             </div>
         </div>
-        """,
+        """
+        ).strip(),
         unsafe_allow_html=True,
     )
 

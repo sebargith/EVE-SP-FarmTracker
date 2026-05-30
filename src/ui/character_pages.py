@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from html import escape
+from textwrap import dedent
 
 import pandas as pd
 import streamlit as st
@@ -486,11 +487,13 @@ def _sp_analytics_table(analytics_df: pd.DataFrame) -> None:
 def _attention_board(alerts: list) -> None:
     if not alerts:
         st.markdown(
-            """
+            dedent(
+                """
             <div class="eve-list-panel">
                 <div class="eve-empty-state">No SP tracking alerts.</div>
             </div>
-            """,
+            """
+            ).strip(),
             unsafe_allow_html=True,
         )
         return
@@ -499,7 +502,8 @@ def _attention_board(alerts: list) -> None:
     for alert in alerts[:6]:
         tone = _severity_tone(alert.severity)
         rows.append(
-            f"""
+            dedent(
+                f"""
             <div class="eve-alert-row {tone}">
                 <div class="eve-alert-top">
                     {status_badge(alert.severity.upper(), tone=tone)}
@@ -510,6 +514,7 @@ def _attention_board(alerts: list) -> None:
                 <div class="eve-alert-action">{escape(alert.action)}</div>
             </div>
             """
+            ).strip()
         )
     if len(alerts) > 6:
         rows.append(
@@ -524,11 +529,13 @@ def _attention_board(alerts: list) -> None:
 def _milestone_board(milestones: list) -> None:
     if not milestones:
         st.markdown(
-            """
+            dedent(
+                """
             <div class="eve-list-panel">
                 <div class="eve-empty-state">No SP milestones available.</div>
             </div>
-            """,
+            """
+            ).strip(),
             unsafe_allow_html=True,
         )
         return
@@ -542,7 +549,8 @@ def _milestone_board(milestones: list) -> None:
         )
         tone = "success" if milestone.days_to_milestone is not None else "warning"
         rows.append(
-            f"""
+            dedent(
+                f"""
             <div class="eve-milestone-row">
                 <div class="eve-alert-top">
                     {status_badge(days, tone=tone)}
@@ -554,6 +562,7 @@ def _milestone_board(milestones: list) -> None:
                 <div class="eve-alert-action">{escape(_format_sp(milestone.remaining_sp))} remaining</div>
             </div>
             """
+            ).strip()
         )
     if len(milestones) > 6:
         rows.append(
