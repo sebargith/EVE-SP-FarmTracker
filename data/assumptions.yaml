@@ -1,0 +1,208 @@
+market:
+  plex_buy_cost_isk: 4810000
+  plex_sell_value_isk: 4810000
+  plex_cost_basis_isk: 4810000
+  large_skill_injector_sell_price_isk: 752900000
+  skill_extractor_market_buy_price_isk: 463500000
+  mct_market_buy_price_isk: 2332850000
+  lsi_market_fee_tax_rate: 0.05
+
+training:
+  optimized_sp_per_minute: 45
+  optimized_sp_per_month_per_queue: 1944000
+  sp_per_large_skill_injector: 500000
+  minimum_sp_before_extraction: 5500000
+  extraction_floor_sp: 5000000
+  one_month_omega_bonus_sp: 100000
+
+omega_plans:
+  - key: base_1m_bonus
+    scenario_type: Base
+    name: 1M Omega + Bonus Items
+    months: 1
+    omega_plex_total: 500
+    bonus_sp: 100000
+  - key: base_3m
+    scenario_type: Base
+    name: 3M Omega
+    months: 3
+    omega_plex_total: 1200
+    bonus_sp: 0
+  - key: base_6m
+    scenario_type: Base
+    name: 6M Omega
+    months: 6
+    omega_plex_total: 2100
+    bonus_sp: 0
+  - key: base_12m
+    scenario_type: Base
+    name: 12M Omega
+    months: 12
+    omega_plex_total: 3600
+    bonus_sp: 0
+  - key: base_24m
+    scenario_type: Base
+    name: 24M Omega
+    months: 24
+    omega_plex_total: 6600
+    bonus_sp: 0
+  - key: capsuleer_day_1m
+    scenario_type: Sale/Event
+    name: Capsuleer Day 1M Omega + 100k SP + skin
+    months: 1
+    omega_plex_total: 400
+    bonus_sp: 100000
+  - key: capsuleer_day_3m
+    scenario_type: Sale/Event
+    name: Capsuleer Day 3M Omega + 2 skins
+    months: 3
+    omega_plex_total: 960
+    bonus_sp: 0
+  - key: winter_12m
+    scenario_type: Sale/Event
+    name: Winter 12M Omega sale
+    months: 12
+    omega_plex_total: 2700
+    bonus_sp: 0
+  - key: winter_24m
+    scenario_type: Sale/Event
+    name: Winter 24M Omega sale
+    months: 24
+    omega_plex_total: 5280
+    bonus_sp: 0
+
+omega_mct_bundle_plans:
+  - key: bundle_1m_2m_mct_50
+    scenario_type: Omega+MCT 50% Bundle
+    name: 1M Omega + 2M MCT 50% bundle
+    months: 1
+    bundle_plex_total: 735
+    bonus_sp: 0
+  - key: bundle_3m_6m_mct_50
+    scenario_type: Omega+MCT 50% Bundle
+    name: 3M Omega + 6M MCT 50% bundle
+    months: 3
+    bundle_plex_total: 2055
+    bonus_sp: 0
+  - key: bundle_6m_12m_mct_50
+    scenario_type: Omega+MCT 50% Bundle
+    name: 6M Omega + 12M MCT 50% bundle
+    months: 6
+    bundle_plex_total: 3960
+    bonus_sp: 0
+  - key: bundle_12m_24m_mct_50
+    scenario_type: Omega+MCT 50% Bundle
+    name: 12M Omega + 24M MCT 50% bundle
+    months: 12
+    bundle_plex_total: 7620
+    bonus_sp: 0
+
+mct_sources:
+  no_mct:
+    name: No MCT
+    unit_plex: 0
+    unit_isk: 0
+  regular:
+    - key: nes_base
+      name: NES base MCT
+      unit_plex: 485
+      unit_isk: 0
+    - key: nes_20_sale
+      name: NES MCT 20% sale
+      unit_plex: 388
+      unit_isk: 0
+    - key: nes_30_sale
+      name: NES MCT 30% sale
+      unit_plex: 339.5
+      unit_isk: 0
+    - key: nes_40_sale
+      name: NES MCT 40% sale
+      unit_plex: 291
+      unit_isk: 0
+    - key: market_certificate
+      name: Market MCT certificate
+      unit_plex: 0
+      unit_isk: 2332850000
+  included_bundle:
+    name: Included in Omega+MCT bundle
+    unit_plex: 0
+    unit_isk: 0
+
+extractor_sources:
+  - key: nes_single
+    name: NES single extractor
+    unit_plex: 140
+    unit_isk: 0
+  - key: nes_5_pack
+    name: NES 5-pack extractor
+    unit_plex: 126
+    unit_isk: 0
+  - key: nes_10_pack
+    name: NES 10-pack extractor
+    unit_plex: 119
+    unit_isk: 0
+  - key: nes_50_pack
+    name: NES 50-pack extractor
+    unit_plex: 112
+    unit_isk: 0
+  - key: nes_3_for_2
+    name: NES 3-for-2 extractor sale
+    unit_plex: 93.33333333333333
+    unit_isk: 0
+  - key: nes_2_for_1
+    name: NES 2-for-1 extractor sale
+    unit_plex: 70
+    unit_isk: 0
+  - key: nes_10_pack_20_sale
+    name: NES 10-pack extractor 20% sale
+    unit_plex: 95.2
+    unit_isk: 0
+  - key: nes_50_pack_20_sale
+    name: NES 50-pack extractor 20% sale
+    unit_plex: 89.6
+    unit_isk: 0
+  - key: market
+    name: Market Skill Extractor
+    unit_plex: 0
+    unit_isk: 463500000
+
+scenario_presets:
+  - key: default
+    name: Default Scenario Set
+    description: Workbook baseline values.
+    plex_cost_basis_isk: 4810000
+    large_skill_injector_sell_price_isk: 752900000
+    skill_extractor_market_buy_price_isk: 463500000
+    mct_market_buy_price_isk: 2332850000
+    lsi_market_fee_tax_rate: 0.05
+  - key: high_discount
+    name: High Discount Set
+    description: Favorable sale environment with stronger LSI price and cheaper PLEX/extractors.
+    plex_cost_basis_isk: 4400000
+    large_skill_injector_sell_price_isk: 900000000
+    skill_extractor_market_buy_price_isk: 435000000
+    mct_market_buy_price_isk: 2100000000
+    lsi_market_fee_tax_rate: 0.05
+  - key: conservative
+    name: Conservative Set
+    description: Cautious values for stress-testing profitability.
+    plex_cost_basis_isk: 5000000
+    large_skill_injector_sell_price_isk: 700000000
+    skill_extractor_market_buy_price_isk: 480000000
+    mct_market_buy_price_isk: 2450000000
+    lsi_market_fee_tax_rate: 0.065
+  - key: market_downturn
+    name: Market Downturn
+    description: Weak LSI sale price with expensive inputs.
+    plex_cost_basis_isk: 5200000
+    large_skill_injector_sell_price_isk: 650000000
+    skill_extractor_market_buy_price_isk: 500000000
+    mct_market_buy_price_isk: 2550000000
+    lsi_market_fee_tax_rate: 0.07
+
+esi:
+  default_region_id: 10000002
+  type_ids:
+    plex: 44992
+    skill_extractor: 40519
+    large_skill_injector: 40520
