@@ -5,6 +5,9 @@ tracking character SP progression, queue health, and next SP milestones.
 Farm readiness, extraction planning, profitability, market prices, wallet, and
 assets are supporting features around that SP tracking workflow.
 
+See [docs/PRODUCT_ROADMAP.md](docs/PRODUCT_ROADMAP.md) for the planned feature
+sequence, the ESI account-grouping boundary, and the visual redesign plan.
+
 ## Current Scope
 
 - Workbook-equivalent scenario calculations.
