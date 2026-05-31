@@ -38,6 +38,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             omega_status TEXT NOT NULL DEFAULT 'Unknown',
             omega_expires_at TEXT,
             mct_slots INTEGER NOT NULL DEFAULT 0,
+            mct_expires_at TEXT,
+            operational_status TEXT NOT NULL DEFAULT 'Active',
             wallet_balance REAL,
             sync_status TEXT NOT NULL DEFAULT 'Manual',
             notes TEXT NOT NULL DEFAULT '',
@@ -196,7 +198,36 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             price_source TEXT NOT NULL DEFAULT 'order_book',
             source TEXT NOT NULL DEFAULT 'ESI'
         );
+
+        CREATE TABLE IF NOT EXISTS extraction_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            character_id INTEGER NOT NULL,
+            timestamp TEXT NOT NULL,
+            injectors_created INTEGER NOT NULL,
+            sp_extracted INTEGER NOT NULL,
+            extractor_unit_cost REAL NOT NULL,
+            extractor_total_cost REAL NOT NULL,
+            lsi_sale_unit_price REAL NOT NULL,
+            gross_revenue REAL NOT NULL,
+            market_fees REAL NOT NULL,
+            realized_revenue REAL NOT NULL,
+            realized_profit REAL NOT NULL,
+            total_sp_before INTEGER NOT NULL,
+            total_sp_after INTEGER NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_extraction_events_character_timestamp
+        ON extraction_events(character_id, timestamp DESC);
         """
+    )
+    _ensure_column(connection, "accounts", "mct_expires_at", "TEXT")
+    _ensure_column(
+        connection,
+        "accounts",
+        "operational_status",
+        "TEXT NOT NULL DEFAULT 'Active'",
     )
     _ensure_column(connection, "characters", "last_sync_at", "TEXT")
     _ensure_column(connection, "characters", "sync_status", "TEXT NOT NULL DEFAULT 'Manual'")

@@ -20,6 +20,8 @@ def list_character_rows(connection: sqlite3.Connection) -> list[dict[str, Any]]:
             accounts.omega_status,
             accounts.omega_expires_at,
             accounts.mct_slots,
+            accounts.mct_expires_at,
+            accounts.operational_status,
             accounts.sync_status,
             characters.id AS character_id,
             characters.name AS character_name,
@@ -56,8 +58,9 @@ def list_accounts(connection: sqlite3.Connection) -> list[dict[str, Any]]:
         SELECT
             accounts.id, accounts.group_id, account_groups.name AS group_name,
             accounts.name, accounts.omega_status, accounts.omega_expires_at,
-            accounts.mct_slots, accounts.wallet_balance, accounts.sync_status,
-            accounts.notes
+            accounts.mct_slots, accounts.mct_expires_at,
+            accounts.operational_status, accounts.wallet_balance,
+            accounts.sync_status, accounts.notes
         FROM accounts
         JOIN account_groups ON account_groups.id = accounts.group_id
         ORDER BY account_groups.name, accounts.name
@@ -88,20 +91,62 @@ def add_account(
     omega_status: str = "Unknown",
     omega_expires_at: str | None = None,
     mct_slots: int = 0,
+    mct_expires_at: str | None = None,
+    operational_status: str = "Active",
     notes: str = "",
 ) -> int:
     cursor = connection.execute(
         """
         INSERT INTO accounts (
             group_id, name, omega_status, omega_expires_at, mct_slots,
-            sync_status, notes
+            mct_expires_at, operational_status, sync_status, notes
         )
-        VALUES (?, ?, ?, ?, ?, 'Manual', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Manual', ?)
         """,
-        (group_id, name, omega_status, omega_expires_at, mct_slots, notes),
+        (
+            group_id,
+            name,
+            omega_status,
+            omega_expires_at,
+            mct_slots,
+            mct_expires_at,
+            operational_status,
+            notes,
+        ),
     )
     connection.commit()
     return int(cursor.lastrowid)
+
+
+def update_account_operations(
+    connection: sqlite3.Connection,
+    *,
+    account_id: int,
+    omega_status: str,
+    omega_expires_at: str | None,
+    mct_slots: int,
+    mct_expires_at: str | None,
+    operational_status: str,
+    notes: str,
+) -> None:
+    connection.execute(
+        """
+        UPDATE accounts
+        SET omega_status = ?, omega_expires_at = ?, mct_slots = ?,
+            mct_expires_at = ?, operational_status = ?, notes = ?
+        WHERE id = ?
+        """,
+        (
+            omega_status,
+            omega_expires_at,
+            int(mct_slots),
+            mct_expires_at,
+            operational_status,
+            notes,
+            int(account_id),
+        ),
+    )
+    connection.commit()
 
 
 def add_character(
@@ -890,6 +935,97 @@ def list_sp_snapshots(
         LIMIT ?
         """,
         (character_id, int(limit)),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_extraction_event(
+    connection: sqlite3.Connection,
+    *,
+    character_id: int,
+    injectors_created: int,
+    sp_extracted: int,
+    extractor_unit_cost: float,
+    extractor_total_cost: float,
+    lsi_sale_unit_price: float,
+    gross_revenue: float,
+    market_fees: float,
+    realized_revenue: float,
+    realized_profit: float,
+    total_sp_before: int,
+    total_sp_after: int,
+    notes: str = "",
+    timestamp: str | None = None,
+) -> int:
+    """Persist one realized extraction and reset the local SP baseline."""
+
+    recorded_at = timestamp or datetime.now(timezone.utc).isoformat()
+    cursor = connection.execute(
+        """
+        INSERT INTO extraction_events (
+            character_id, timestamp, injectors_created, sp_extracted,
+            extractor_unit_cost, extractor_total_cost, lsi_sale_unit_price,
+            gross_revenue, market_fees, realized_revenue, realized_profit,
+            total_sp_before, total_sp_after, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(character_id),
+            recorded_at,
+            int(injectors_created),
+            int(sp_extracted),
+            float(extractor_unit_cost),
+            float(extractor_total_cost),
+            float(lsi_sale_unit_price),
+            float(gross_revenue),
+            float(market_fees),
+            float(realized_revenue),
+            float(realized_profit),
+            int(total_sp_before),
+            int(total_sp_after),
+            notes,
+        ),
+    )
+    connection.execute(
+        """
+        UPDATE characters
+        SET total_sp = ?, total_sp_updated_at = ?
+        WHERE id = ?
+        """,
+        (int(total_sp_after), recorded_at, int(character_id)),
+    )
+    connection.execute(
+        """
+        INSERT INTO sp_snapshots (character_id, timestamp, total_sp, source, notes)
+        VALUES (?, ?, ?, 'Extraction', ?)
+        """,
+        (int(character_id), recorded_at, int(total_sp_after), notes or "Extraction event"),
+    )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def list_extraction_events(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+            extraction_events.*,
+            characters.name AS character_name,
+            accounts.name AS account_name,
+            account_groups.name AS group_name
+        FROM extraction_events
+        JOIN characters ON characters.id = extraction_events.character_id
+        JOIN accounts ON accounts.id = characters.account_id
+        JOIN account_groups ON account_groups.id = accounts.group_id
+        ORDER BY extraction_events.timestamp DESC, extraction_events.id DESC
+        LIMIT ?
+        """,
+        (int(limit),),
     ).fetchall()
     return [dict(row) for row in rows]
 

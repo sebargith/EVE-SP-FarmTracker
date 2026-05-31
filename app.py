@@ -92,7 +92,7 @@ def main() -> None:
     if active_view == "SP Overview":
         characters_page(connection, assumptions.training)
     elif active_view == "Farm / Extraction":
-        farm_extraction_page(connection, assumptions.training)
+        farm_extraction_page(connection, assumptions)
     elif active_view == "Market":
         market_page(connection)
     elif active_view == "Command Center":

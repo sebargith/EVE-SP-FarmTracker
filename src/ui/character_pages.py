@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from html import escape
 from textwrap import dedent
 
 import pandas as pd
 import streamlit as st
 
-from src.calculations.assumptions import TrainingAssumptions
+from src.calculations.assumptions import FarmAssumptions, TrainingAssumptions
 from src.charts.account_charts import (
     extractable_sp_by_group_chart,
     projected_sp_by_group_chart,
@@ -31,11 +32,13 @@ from src.data.repositories import (
     list_accounts,
     list_assets_by_type,
     list_character_skills,
+    list_extraction_events,
     list_groups,
     list_recent_sync_runs,
     list_skill_queue_entries,
     list_sp_snapshots,
     latest_wallet_snapshot,
+    update_account_operations,
     update_character_sp,
 )
 from src.integrations.esi_public import (
@@ -53,6 +56,11 @@ from src.integrations.sso import (
     validate_access_token,
 )
 from src.integrations.token_store import TokenStoreError
+from src.services.account_operations_service import (
+    AccountOperation,
+    list_account_operations,
+    summarize_account_operations,
+)
 from src.services.character_service import (
     CharacterProgress,
     list_character_progress,
@@ -64,6 +72,12 @@ from src.services.esi_sync_service import (
     list_sync_health,
     sync_character_from_token_row,
     sync_due_authorized_characters,
+)
+from src.services.extraction_service import (
+    ExtractionPlanRow,
+    build_extraction_plan,
+    log_realized_extraction,
+    summarize_extraction_plan,
 )
 from src.services.sp_tracking_service import (
     analytics_dataframe,
@@ -126,6 +140,12 @@ def characters_page(
         "Progression, queue health, and snapshot trend signals.",
     )
     _sp_command_metrics(sp_summary, tracking_df, alerts)
+
+    section_header(
+        "Account Operations",
+        "Manual Omega and MCT coverage with queue utilization warnings.",
+    )
+    _account_operations_panel(connection, training, progress)
 
     section_header(
         "Sync Diagnostics",
@@ -231,31 +251,33 @@ def characters_page(
 
 def farm_extraction_page(
     connection: sqlite3.Connection,
-    training: TrainingAssumptions,
+    assumptions: FarmAssumptions,
 ) -> None:
     """Render the supporting farm readiness and extraction planning view."""
 
-    progress = list_character_progress(connection, training)
+    progress = list_character_progress(connection, assumptions.training)
     farm_summary = summarize_progress(progress)
     progress_df = progress_to_dataframe(progress)
+    plan = build_extraction_plan(connection, assumptions, progress=progress)
+    plan_summary = summarize_extraction_plan(plan)
 
     section_header(
         "Farm / Extraction Support",
         "Secondary view for extraction readiness after SP tracking flags useful action.",
     )
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         metric_card(
             "Ready Characters",
-            f"{farm_summary.ready_characters:,}",
+            f"{plan_summary.ready_characters:,}",
             "ready state now",
-            tone="success" if farm_summary.ready_characters else "neutral",
+            tone="success" if plan_summary.ready_characters else "neutral",
             icon="RDY",
         )
     with c2:
         metric_card(
             "Whole Injectors",
-            f"{farm_summary.total_available_injectors:,}",
+            f"{plan_summary.injectors_ready:,}",
             "available above floor",
             tone="success" if farm_summary.total_available_injectors else "neutral",
             icon="LSI",
@@ -270,11 +292,19 @@ def farm_extraction_page(
         )
     with c4:
         metric_card(
-            "Monthly Injectors",
-            f"{farm_summary.projected_monthly_injectors:,.2f}",
-            "projected from training",
-            tone="success",
-            icon="30D",
+            "Available This Week",
+            f"{plan_summary.injectors_available_this_week:,}",
+            "ready plus near-term injectors",
+            tone="success" if plan_summary.injectors_available_this_week else "neutral",
+            icon="7D",
+        )
+    with c5:
+        metric_card(
+            "Planned Net",
+            _format_isk(plan_summary.planned_net_profit),
+            "LSI net less extractors",
+            tone="success" if plan_summary.planned_net_profit >= 0 else "danger",
+            icon="ISK",
         )
 
     chart_left, chart_right = st.columns(2, gap="large")
@@ -289,10 +319,20 @@ def farm_extraction_page(
             key="farm_extractable_sp_chart",
         )
 
-    section_header("Extraction Readiness Queue", "Grouped by account group and account.")
-    _farm_readiness_table(progress)
+    section_header(
+        "Extraction Action Queue",
+        "Recommendations use tracked SP and the editable sidebar market assumptions.",
+    )
+    _extraction_plan_table(plan)
 
-    with st.expander("Grouped Farm View", expanded=True):
+    action_tab, audit_tab, grouped_tab = st.tabs(
+        ["Log Completed Extraction", "Extraction Audit", "Grouped Farm View"]
+    )
+    with action_tab:
+        _log_extraction_form(connection, assumptions, plan)
+    with audit_tab:
+        _extraction_audit_table(connection)
+    with grouped_tab:
         _grouped_character_view(progress)
 
 
@@ -403,6 +443,144 @@ def _sp_tracking_table(tracking_df: pd.DataFrame) -> None:
     )
 
 
+def _account_operations_panel(
+    connection: sqlite3.Connection,
+    training: TrainingAssumptions,
+    progress: list[CharacterProgress],
+) -> None:
+    operations = list_account_operations(connection, training, progress=progress)
+    if not operations:
+        st.info("No accounts are tracked yet.")
+        return
+
+    summary = summarize_account_operations(operations)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card(
+            "Healthy Accounts",
+            f"{summary.healthy_accounts:,}/{summary.total_accounts:,}",
+            f"{summary.attention_accounts:,} need attention",
+            tone="success" if not summary.attention_accounts else "warning",
+            icon="ACC",
+        )
+    with c2:
+        metric_card(
+            "Active Queues",
+            f"{summary.active_queues:,}/{summary.queue_capacity:,}",
+            "tracked vs available slots",
+            tone="success" if summary.active_queues == summary.queue_capacity else "warning",
+            icon="QUE",
+        )
+    with c3:
+        metric_card(
+            "Unassigned Slots",
+            f"{summary.unused_queue_slots:,}",
+            "main queue plus MCT capacity",
+            tone="warning" if summary.unused_queue_slots else "success",
+            icon="MCT",
+        )
+    with c4:
+        metric_card(
+            "Stopped Queues",
+            f"{summary.stopped_queues:,}",
+            "tracked characters not training",
+            tone="danger" if summary.stopped_queues else "success",
+            icon="ALT",
+        )
+
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Group": row.group_name,
+                    "Account": row.account_name,
+                    "Health": row.health,
+                    "Operation": row.operational_status,
+                    "Omega": row.omega_status,
+                    "Omega Expires": row.omega_expires_at,
+                    "MCT Slots": row.mct_slots,
+                    "MCT Expires": row.mct_expires_at,
+                    "Tracked Characters": row.tracked_characters,
+                    "Active Queues": row.active_queues,
+                    "Queue Capacity": row.queue_capacity,
+                    "Unassigned Slots": row.unused_queue_slots,
+                    "Stopped Queues": row.stopped_queues,
+                    "Warnings": "; ".join(row.warnings) or "none",
+                }
+                for row in operations
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    with st.expander("Edit Account Operations", expanded=False):
+        _account_operations_form(connection, operations)
+
+
+def _account_operations_form(
+    connection: sqlite3.Connection,
+    operations: list[AccountOperation],
+) -> None:
+    labels = {
+        f"{row.group_name} / {row.account_name}": row
+        for row in operations
+    }
+    selected = labels[
+        st.selectbox("Account", list(labels), key="account_operations_account")
+    ]
+    operational_options = ["Active", "Paused", "Retiring"]
+    omega_options = ["Omega", "Alpha", "Unknown"]
+    operational_status = st.selectbox(
+        "Operational status",
+        operational_options,
+        index=_option_index(operational_options, selected.operational_status),
+    )
+    omega_status = st.selectbox(
+        "Omega status",
+        omega_options,
+        index=_option_index(omega_options, selected.omega_status),
+    )
+    omega_expires = st.text_input(
+        "Omega expiration date",
+        value=_date_field_value(selected.omega_expires_at),
+        placeholder="YYYY-MM-DD",
+        help="Manual field. Leave blank if the date is unknown.",
+    )
+    mct_slots = st.number_input(
+        "MCT slots",
+        min_value=0,
+        max_value=2,
+        value=selected.mct_slots,
+        step=1,
+    )
+    mct_expires = st.text_input(
+        "MCT expiration date",
+        value=_date_field_value(selected.mct_expires_at),
+        placeholder="YYYY-MM-DD",
+        help="Manual field. Leave blank if the date is unknown or no MCT is active.",
+    )
+    notes = st.text_area("Account notes", value=selected.notes)
+
+    if st.button("Save Account Operations"):
+        try:
+            update_account_operations(
+                connection,
+                account_id=selected.account_id,
+                omega_status=omega_status,
+                omega_expires_at=_normalize_expiration(omega_expires),
+                mct_slots=int(mct_slots),
+                mct_expires_at=_normalize_expiration(mct_expires),
+                operational_status=operational_status,
+                notes=notes,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.success("Account operations updated.")
+            st.rerun()
+
+
 def _farm_readiness_table(progress: list[CharacterProgress]) -> None:
     rows = [
         {
@@ -433,6 +611,172 @@ def _farm_readiness_table(progress: list[CharacterProgress]) -> None:
                 "Days To Next Injector",
                 format="%.2f",
             ),
+        },
+    )
+
+
+def _extraction_plan_table(plan: list[ExtractionPlanRow]) -> None:
+    if not plan:
+        st.info("No tracked characters are available for extraction planning.")
+        return
+
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Group": row.group_name,
+                    "Account": row.account_name,
+                    "Character": row.character_name,
+                    "Recommendation": row.recommendation,
+                    "State": row.readiness,
+                    "Projected SP": row.projected_sp,
+                    "Extractable SP": row.extractable_sp,
+                    "Injectors Ready": row.injectors_ready,
+                    "Days To Next": row.days_to_next_injector,
+                    "Gross Revenue": row.gross_revenue,
+                    "Fees": row.market_fees,
+                    "Extractor Cost": row.extractor_total_cost,
+                    "Projected Net": row.projected_profit,
+                    "Queue Ends": row.queue_ends_at,
+                }
+                for row in plan
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Projected SP": st.column_config.NumberColumn("Projected SP", format="%d SP"),
+            "Extractable SP": st.column_config.NumberColumn("Extractable SP", format="%d SP"),
+            "Injectors Ready": st.column_config.NumberColumn("Injectors Ready", format="%d"),
+            "Days To Next": st.column_config.NumberColumn("Days To Next", format="%.2f"),
+            "Gross Revenue": st.column_config.NumberColumn("Gross Revenue", format="%.0f ISK"),
+            "Fees": st.column_config.NumberColumn("Fees", format="%.0f ISK"),
+            "Extractor Cost": st.column_config.NumberColumn("Extractor Cost", format="%.0f ISK"),
+            "Projected Net": st.column_config.NumberColumn("Projected Net", format="%.0f ISK"),
+        },
+    )
+
+
+def _log_extraction_form(
+    connection: sqlite3.Connection,
+    assumptions: FarmAssumptions,
+    plan: list[ExtractionPlanRow],
+) -> None:
+    ready = [row for row in plan if row.injectors_ready > 0]
+    if not ready:
+        st.info("No character currently has a whole injector available.")
+        return
+
+    labels = {
+        f"{row.group_name} / {row.account_name} / {row.character_name}": row
+        for row in ready
+    }
+    selected = labels[
+        st.selectbox("Character", list(labels), key="extraction_event_character")
+    ]
+    injectors = st.number_input(
+        "Injectors created",
+        min_value=1,
+        max_value=selected.injectors_ready,
+        value=selected.injectors_ready,
+        step=1,
+        key=f"extraction_injectors_{selected.character_id}",
+    )
+    lsi_price = st.number_input(
+        "Realized LSI sale price per unit",
+        min_value=0,
+        value=int(selected.lsi_unit_price),
+        step=10_000_000,
+        format="%d",
+        key=f"extraction_lsi_price_{selected.character_id}",
+    )
+    extractor_cost = st.number_input(
+        "Realized extractor cost per unit",
+        min_value=0,
+        value=int(selected.extractor_unit_cost),
+        step=10_000_000,
+        format="%d",
+        key=f"extraction_extractor_cost_{selected.character_id}",
+    )
+    fee_pct = st.number_input(
+        "Realized fees and taxes (%)",
+        min_value=0.0,
+        max_value=99.0,
+        value=float(selected.market_fee_rate * 100),
+        step=0.25,
+        format="%.2f",
+        key=f"extraction_fee_pct_{selected.character_id}",
+    )
+    notes = st.text_input(
+        "Extraction notes",
+        value="",
+        key=f"extraction_notes_{selected.character_id}",
+    )
+    estimated_net = (
+        int(injectors) * float(lsi_price) * (1 - float(fee_pct) / 100)
+        - int(injectors) * float(extractor_cost)
+    )
+    st.caption(f"Estimated realized net: {_format_isk(estimated_net)}")
+
+    if st.button("Record Completed Extraction"):
+        try:
+            log_realized_extraction(
+                connection,
+                assumptions,
+                character_id=selected.character_id,
+                injectors_created=int(injectors),
+                lsi_sale_unit_price=float(lsi_price),
+                extractor_unit_cost=float(extractor_cost),
+                market_fee_rate=float(fee_pct) / 100,
+                notes=notes,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.success("Extraction event recorded and SP baseline updated.")
+            st.rerun()
+
+
+def _extraction_audit_table(connection: sqlite3.Connection) -> None:
+    events = list_extraction_events(connection, limit=100)
+    if not events:
+        st.info("No completed extraction events have been recorded yet.")
+        return
+
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Timestamp": row["timestamp"],
+                    "Group": row["group_name"],
+                    "Account": row["account_name"],
+                    "Character": row["character_name"],
+                    "Injectors": row["injectors_created"],
+                    "SP Extracted": row["sp_extracted"],
+                    "LSI Unit Price": row["lsi_sale_unit_price"],
+                    "Extractor Cost": row["extractor_total_cost"],
+                    "Fees": row["market_fees"],
+                    "Realized Revenue": row["realized_revenue"],
+                    "Realized Profit": row["realized_profit"],
+                    "SP Before": row["total_sp_before"],
+                    "SP After": row["total_sp_after"],
+                    "Notes": row["notes"],
+                }
+                for row in events
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Injectors": st.column_config.NumberColumn("Injectors", format="%d"),
+            "SP Extracted": st.column_config.NumberColumn("SP Extracted", format="%d SP"),
+            "LSI Unit Price": st.column_config.NumberColumn("LSI Unit Price", format="%.0f ISK"),
+            "Extractor Cost": st.column_config.NumberColumn("Extractor Cost", format="%.0f ISK"),
+            "Fees": st.column_config.NumberColumn("Fees", format="%.0f ISK"),
+            "Realized Revenue": st.column_config.NumberColumn("Realized Revenue", format="%.0f ISK"),
+            "Realized Profit": st.column_config.NumberColumn("Realized Profit", format="%.0f ISK"),
+            "SP Before": st.column_config.NumberColumn("SP Before", format="%d SP"),
+            "SP After": st.column_config.NumberColumn("SP After", format="%d SP"),
         },
     )
 
@@ -835,6 +1179,26 @@ def _format_isk(value: float) -> str:
     if abs(value) >= 1_000_000:
         return f"{value / 1_000_000:.1f}M ISK"
     return f"{value:,.0f} ISK"
+
+
+def _option_index(options: list[str], selected: str) -> int:
+    return options.index(selected) if selected in options else 0
+
+
+def _date_field_value(value: str | None) -> str:
+    return str(value)[:10] if value else ""
+
+
+def _normalize_expiration(value: str) -> str | None:
+    if not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise ValueError("Expiration dates must use YYYY-MM-DD format.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _format_sp(value: float) -> str:
