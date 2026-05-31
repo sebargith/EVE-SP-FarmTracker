@@ -24,6 +24,8 @@ sequence, the ESI account-grouping boundary, and the visual redesign plan.
 - Public ESI market snapshots for LSI, Skill Extractors, and PLEX where the
   public order book exposes a price.
 - Locked reference fixture tests plus optional full Excel workbook audit.
+- Multi-character Loot Tracker sessions with explicit start, stop, retry, and
+  editable confirmation steps using stored EVE SSO asset permissions.
 
 Extraction planning history is planned later.
 

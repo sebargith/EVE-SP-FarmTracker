@@ -1226,6 +1226,389 @@ def count_character_assets(connection: sqlite3.Connection, *, character_id: int)
     )
 
 
+def create_loot_session(
+    connection: sqlite3.Connection,
+    *,
+    assets_by_character: dict[int, list[dict[str, Any]]],
+    notes: str = "",
+    started_at: str | None = None,
+) -> int:
+    """Create a loot session and persist its starting asset evidence."""
+
+    if not assets_by_character:
+        raise ValueError("Select at least one character before starting loot tracking.")
+    recorded_at = started_at or datetime.now(timezone.utc).isoformat()
+    cursor = connection.execute(
+        """
+        INSERT INTO loot_sessions (status, started_at, notes)
+        VALUES ('Active', ?, ?)
+        """,
+        (recorded_at, notes),
+    )
+    session_id = int(cursor.lastrowid)
+    connection.executemany(
+        """
+        INSERT INTO loot_session_characters (session_id, character_id)
+        VALUES (?, ?)
+        """,
+        [(session_id, int(character_id)) for character_id in assets_by_character],
+    )
+    _insert_loot_asset_snapshot_rows(
+        connection,
+        session_id=session_id,
+        phase="Start",
+        captured_at=recorded_at,
+        assets_by_character=assets_by_character,
+    )
+    connection.commit()
+    return session_id
+
+
+def replace_loot_end_snapshots(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    assets_by_character: dict[int, list[dict[str, Any]]],
+    captured_at: str | None = None,
+) -> None:
+    """Replace the latest end snapshot for a loot session."""
+
+    recorded_at = captured_at or datetime.now(timezone.utc).isoformat()
+    connection.execute(
+        "DELETE FROM loot_asset_snapshots WHERE session_id = ? AND phase = 'End'",
+        (int(session_id),),
+    )
+    _insert_loot_asset_snapshot_rows(
+        connection,
+        session_id=session_id,
+        phase="End",
+        captured_at=recorded_at,
+        assets_by_character=assets_by_character,
+    )
+    connection.execute(
+        """
+        UPDATE loot_sessions
+        SET status = 'Awaiting Confirmation', end_snapshot_at = ?
+        WHERE id = ?
+        """,
+        (recorded_at, int(session_id)),
+    )
+    connection.commit()
+
+
+def get_open_loot_session(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM loot_sessions
+        WHERE status IN ('Active', 'Awaiting Confirmation')
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_loot_session(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT * FROM loot_sessions WHERE id = ?",
+        (int(session_id),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_loot_session_characters(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+            characters.id AS character_id,
+            characters.eve_character_id,
+            characters.name AS character_name,
+            accounts.name AS account_name,
+            account_groups.name AS group_name
+        FROM loot_session_characters
+        JOIN characters ON characters.id = loot_session_characters.character_id
+        JOIN accounts ON accounts.id = characters.account_id
+        JOIN account_groups ON account_groups.id = accounts.group_id
+        WHERE loot_session_characters.session_id = ?
+        ORDER BY account_groups.name, accounts.name, characters.name
+        """,
+        (int(session_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_loot_asset_diff_by_type(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+) -> list[dict[str, Any]]:
+    """Return positive combined asset differences across selected characters."""
+
+    rows = connection.execute(
+        """
+        WITH start_totals AS (
+            SELECT type_id, SUM(quantity) AS quantity
+            FROM loot_asset_snapshots
+            WHERE session_id = ? AND phase = 'Start'
+            GROUP BY type_id
+        ),
+        end_totals AS (
+            SELECT type_id, SUM(quantity) AS quantity
+            FROM loot_asset_snapshots
+            WHERE session_id = ? AND phase = 'End'
+            GROUP BY type_id
+        )
+        SELECT
+            end_totals.type_id,
+            end_totals.quantity - COALESCE(start_totals.quantity, 0) AS quantity
+        FROM end_totals
+        LEFT JOIN start_totals ON start_totals.type_id = end_totals.type_id
+        WHERE end_totals.quantity - COALESCE(start_totals.quantity, 0) > 0
+        ORDER BY end_totals.type_id
+        """,
+        (int(session_id), int(session_id)),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_loot_end_holders_by_type(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+            loot_asset_snapshots.type_id,
+            characters.name AS character_name,
+            SUM(loot_asset_snapshots.quantity) AS quantity
+        FROM loot_asset_snapshots
+        JOIN characters ON characters.id = loot_asset_snapshots.character_id
+        WHERE loot_asset_snapshots.session_id = ?
+          AND loot_asset_snapshots.phase = 'End'
+        GROUP BY loot_asset_snapshots.type_id, characters.id
+        ORDER BY loot_asset_snapshots.type_id, characters.name
+        """,
+        (int(session_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def replace_loot_asset_diff_items(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    items: list[dict[str, Any]],
+) -> None:
+    """Replace generated asset-diff items while preserving manual additions."""
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    connection.execute(
+        "DELETE FROM loot_session_items WHERE session_id = ? AND item_source = 'Asset diff'",
+        (int(session_id),),
+    )
+    connection.executemany(
+        """
+        INSERT INTO loot_session_items (
+            session_id, type_id, item_name, quantity, unit_value_isk,
+            total_value_isk, price_source, included, item_source, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'Asset diff', ?)
+        """,
+        [
+            (
+                int(session_id),
+                int(item["type_id"]),
+                str(item["item_name"]),
+                int(item["quantity"]),
+                float(item.get("unit_value_isk", 0)),
+                float(item.get("total_value_isk", 0)),
+                str(item.get("price_source", "Unpriced")),
+                timestamp,
+            )
+            for item in items
+        ],
+    )
+    connection.commit()
+
+
+def add_manual_loot_item(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    item_name: str,
+    quantity: int,
+    unit_value_isk: float,
+) -> int:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    cursor = connection.execute(
+        """
+        INSERT INTO loot_session_items (
+            session_id, type_id, item_name, quantity, unit_value_isk,
+            total_value_isk, price_source, included, item_source, updated_at
+        )
+        VALUES (?, NULL, ?, ?, ?, ?, 'Manual', 1, 'Manual', ?)
+        """,
+        (
+            int(session_id),
+            item_name,
+            int(quantity),
+            float(unit_value_isk),
+            int(quantity) * float(unit_value_isk),
+            timestamp,
+        ),
+    )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def list_loot_session_items(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT id, session_id, type_id, item_name, quantity, unit_value_isk,
+               total_value_isk, price_source, included, item_source, updated_at
+        FROM loot_session_items
+        WHERE session_id = ?
+        ORDER BY total_value_isk DESC, item_name
+        """,
+        (int(session_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_loot_session_items(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    items: list[dict[str, Any]],
+) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    connection.executemany(
+        """
+        UPDATE loot_session_items
+        SET included = ?, quantity = ?, unit_value_isk = ?,
+            total_value_isk = ?, updated_at = ?
+        WHERE id = ? AND session_id = ?
+        """,
+        [
+            (
+                1 if bool(item.get("included", True)) else 0,
+                int(item["quantity"]),
+                float(item["unit_value_isk"]),
+                int(item["quantity"]) * float(item["unit_value_isk"]),
+                timestamp,
+                int(item["id"]),
+                int(session_id),
+            )
+            for item in items
+        ],
+    )
+    connection.commit()
+
+
+def confirm_loot_session(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    confirmed_at: str | None = None,
+) -> None:
+    timestamp = confirmed_at or datetime.now(timezone.utc).isoformat()
+    connection.execute(
+        """
+        UPDATE loot_sessions
+        SET status = 'Confirmed', confirmed_at = ?
+        WHERE id = ? AND status = 'Awaiting Confirmation'
+        """,
+        (timestamp, int(session_id)),
+    )
+    connection.commit()
+
+
+def list_loot_sessions(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+            loot_sessions.*,
+            COALESCE(character_totals.character_count, 0) AS character_count,
+            COALESCE(item_totals.total_value_isk, 0) AS total_value_isk
+        FROM loot_sessions
+        LEFT JOIN (
+            SELECT session_id, COUNT(*) AS character_count
+            FROM loot_session_characters
+            GROUP BY session_id
+        ) character_totals ON character_totals.session_id = loot_sessions.id
+        LEFT JOIN (
+            SELECT
+                session_id,
+                SUM(
+                    CASE
+                        WHEN included = 1 THEN total_value_isk
+                        ELSE 0
+                    END
+                ) AS total_value_isk
+            FROM loot_session_items
+            GROUP BY session_id
+        ) item_totals ON item_totals.session_id = loot_sessions.id
+        ORDER BY loot_sessions.started_at DESC, loot_sessions.id DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _insert_loot_asset_snapshot_rows(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    phase: str,
+    captured_at: str,
+    assets_by_character: dict[int, list[dict[str, Any]]],
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO loot_asset_snapshots (
+            session_id, character_id, phase, item_id, type_id, quantity,
+            location_id, location_type, location_flag, captured_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                int(session_id),
+                int(character_id),
+                phase,
+                int(asset["item_id"]),
+                int(asset["type_id"]),
+                int(asset.get("quantity", 1)),
+                int(asset["location_id"]),
+                str(asset.get("location_type", "")),
+                str(asset.get("location_flag", "")),
+                captured_at,
+            )
+            for character_id, assets in assets_by_character.items()
+            for asset in assets
+        ],
+    )
+
+
 def add_market_snapshot(
     connection: sqlite3.Connection,
     *,

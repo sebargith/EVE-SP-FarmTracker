@@ -17,6 +17,7 @@ from src.ui.formatting import format_isk
 APP_VIEWS = (
     "SP Overview",
     "Farm / Extraction",
+    "Loot Tracker",
     "Market",
     "Command Center",
     "Scenario Matrix",

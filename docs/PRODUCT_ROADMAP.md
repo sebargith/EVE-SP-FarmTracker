@@ -66,6 +66,8 @@ Official reference:
   Extractors.
 - Extraction planning, event lifecycle tracking, and post-extraction ESI
   reconciliation.
+- Multi-character Loot Tracker sessions with explicit start, stop, retry, and
+  editable confirmation steps using stored EVE SSO asset permissions.
 - Left navigation rail and an initial EVE-like Streamlit dashboard shell.
 
 ### Partial
@@ -331,6 +333,13 @@ These features are committed roadmap scope:
 
    Attribute projected SP output, injector output, recurring cost, expected
    revenue, and expected profit to each local account. Planned in Phase 4.
+
+4. Loot Tracker
+
+   Track explicit multi-character looting windows from before-and-after ESI
+   asset snapshots, exclude transfers between participating characters, and
+   confirm editable candidate loot with market-average or manual values.
+   Implemented as a secondary left-navigation view.
 
 ## Additional Feature Candidates
 

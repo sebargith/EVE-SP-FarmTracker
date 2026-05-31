@@ -15,6 +15,7 @@ from src.services.market_service import latest_market_scenario_overrides
 from src.services.scenario_service import scenario_matrix_for_market
 from src.ui.character_pages import characters_page, farm_extraction_page
 from src.ui.components import app_header
+from src.ui.loot_pages import loot_tracker_page
 from src.ui.market_pages import market_page
 from src.ui.scenario_pages import break_even, command_center, scenario_matrix
 from src.ui.sidebar import filter_frame, sidebar_assumptions, sidebar_navigation
@@ -85,7 +86,7 @@ def main() -> None:
         last_updated=market_overrides.timestamp,
     )
 
-    if filtered.empty:
+    if filtered.empty and active_view in {"Command Center", "Scenario Matrix", "Break-even"}:
         st.warning("No scenarios match the current filters.")
         return
 
@@ -93,6 +94,8 @@ def main() -> None:
         characters_page(connection, assumptions.training)
     elif active_view == "Farm / Extraction":
         farm_extraction_page(connection, assumptions)
+    elif active_view == "Loot Tracker":
+        loot_tracker_page(connection)
     elif active_view == "Market":
         market_page(connection)
     elif active_view == "Command Center":

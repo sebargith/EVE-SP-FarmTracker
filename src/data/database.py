@@ -181,6 +181,63 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS loot_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT NOT NULL DEFAULT 'Active',
+            started_at TEXT NOT NULL,
+            end_snapshot_at TEXT,
+            confirmed_at TEXT,
+            notes TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS loot_session_characters (
+            session_id INTEGER NOT NULL,
+            character_id INTEGER NOT NULL,
+            PRIMARY KEY(session_id, character_id),
+            FOREIGN KEY(session_id) REFERENCES loot_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS loot_asset_snapshots (
+            session_id INTEGER NOT NULL,
+            character_id INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            item_id INTEGER NOT NULL,
+            type_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            location_id INTEGER NOT NULL,
+            location_type TEXT NOT NULL,
+            location_flag TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            PRIMARY KEY(session_id, character_id, phase, item_id),
+            FOREIGN KEY(session_id) REFERENCES loot_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS loot_session_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            type_id INTEGER,
+            item_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            unit_value_isk REAL NOT NULL DEFAULT 0,
+            total_value_isk REAL NOT NULL DEFAULT 0,
+            price_source TEXT NOT NULL DEFAULT 'Unpriced',
+            included INTEGER NOT NULL DEFAULT 1,
+            item_source TEXT NOT NULL DEFAULT 'Asset diff',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES loot_sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_loot_sessions_status_started
+        ON loot_sessions(status, started_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_loot_asset_snapshots_session_phase
+        ON loot_asset_snapshots(session_id, phase);
+
+        CREATE INDEX IF NOT EXISTS idx_loot_session_items_session
+        ON loot_session_items(session_id);
+
         CREATE TABLE IF NOT EXISTS market_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
