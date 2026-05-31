@@ -90,6 +90,25 @@ class EsiPublicClient:
             for row in response.json()
         }
 
+    def resolve_inventory_type_ids(self, names: list[str] | tuple[str, ...]) -> dict[str, int]:
+        """Resolve exact inventory type names through the public universe endpoint."""
+
+        unique_names = sorted({str(name).strip() for name in names if str(name).strip()})
+        if not unique_names:
+            return {}
+
+        response = self.client.post(
+            f"{self.base_url}/universe/ids/",
+            headers=self.headers,
+            params={"datasource": "tranquility"},
+            json=unique_names,
+        )
+        response.raise_for_status()
+        return {
+            str(item["name"]): int(item["id"])
+            for item in response.json().get("inventory_types", [])
+        }
+
     def _get_paginated(self, path: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
         first_response = self.client.get(
             f"{self.base_url}{path}",

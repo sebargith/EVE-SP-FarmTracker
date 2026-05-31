@@ -339,10 +339,10 @@ These features are committed roadmap scope:
 
    Track one explicit global looting run from `Start Tracking` until the user
    stops it. Accept repeated EVE cargo clipboard pastes, optionally tag each
-   paste to a local character, accumulate item quantities and pasted estimated
-   values, remove individual rows with an `X` action, and persist automatic
-   ignore filters for unwanted items. Implemented as a secondary
-   left-navigation view without ESI asset polling.
+   paste to a local character, accumulate item quantities, apply cached public
+   Jita buy valuations automatically, remove individual rows with an `X`
+   action, and persist automatic ignore filters for unwanted items. Implemented
+   as a secondary left-navigation view without authenticated ESI asset polling.
 
 ## Additional Feature Candidates
 

@@ -25,8 +25,8 @@ sequence, the ESI account-grouping boundary, and the visual redesign plan.
   public order book exposes a price.
 - Locked reference fixture tests plus optional full Excel workbook audit.
 - Clipboard-driven Loot Tracker runs with explicit start and stop controls,
-  repeatable cargo pastes, cumulative totals, item removal, and automatic
-  ignore filters.
+  repeatable cargo pastes, cumulative totals, public Jita buy valuations, item
+  removal, and automatic ignore filters.
 
 Extraction planning history is planned later.
 

@@ -93,6 +93,7 @@ def test_tracking_run_accumulates_pastes_filters_items_and_saves_history() -> No
             "Metal Scraps\t5\tCommodity\t50,000 ISK"
         ),
         now=datetime(2026, 5, 31, 10, 5, tzinfo=timezone.utc),
+        auto_price=False,
     )
     assert first.accepted_item_count == 2
     assert first.imported_value_isk == 450_000
@@ -109,6 +110,7 @@ def test_tracking_run_accumulates_pastes_filters_items_and_saves_history() -> No
             "Tripped Power Circuit\t1\tSalvage\t500,000 ISK"
         ),
         now=datetime(2026, 5, 31, 10, 15, tzinfo=timezone.utc),
+        auto_price=False,
     )
     assert second.parsed_item_count == 3
     assert second.accepted_item_count == 2
@@ -149,7 +151,12 @@ def test_tracking_run_accumulates_pastes_filters_items_and_saves_history() -> No
 def test_remove_item_and_remove_filter() -> None:
     connection = _connection()
     run_id = start_tracking(connection)
-    import_cargo_text(connection, session_id=run_id, raw_text="Metal Scraps x 4")
+    import_cargo_text(
+        connection,
+        session_id=run_id,
+        raw_text="Metal Scraps x 4",
+        auto_price=False,
+    )
     item_id = int(current_items(connection, session_id=run_id)[0]["id"])
 
     remove_item(connection, session_id=run_id, item_id=item_id)

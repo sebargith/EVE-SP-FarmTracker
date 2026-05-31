@@ -23,11 +23,16 @@ from src.data.repositories import (
     remove_loot_excluded_item,
     update_clipboard_loot_item,
 )
+from src.integrations.esi_public import EsiPublicClient
+from src.services.loot_pricing_service import (
+    LootPriceRefreshSummary,
+    normalize_item_name,
+    refresh_loot_prices,
+)
 
 
 _HEADER_NAMES = frozenset(("item", "item name", "name", "type"))
 _NUMBER_CHARS = re.compile(r"[^0-9,.\-]")
-_WHITESPACE = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,8 @@ class LootImportSummary:
     accepted_item_count: int
     ignored_item_count: int
     imported_value_isk: float
+    price_refresh: LootPriceRefreshSummary | None
+    pricing_error: str | None
 
 
 def start_tracking(
@@ -73,6 +80,8 @@ def import_cargo_text(
     raw_text: str,
     character_id: int | None = None,
     now: datetime | None = None,
+    pricing_client: EsiPublicClient | None = None,
+    auto_price: bool = True,
 ) -> LootImportSummary:
     """Parse and add one pasted cargo block to an active tracking run."""
 
@@ -95,12 +104,26 @@ def import_cargo_text(
         ignored_item_count=ignored_count,
         imported_at=imported_at,
     )
+    price_refresh = None
+    pricing_error = None
+    if auto_price:
+        try:
+            price_refresh = refresh_loot_prices(
+                connection,
+                session_id=session_id,
+                client=pricing_client,
+                now=now,
+            )
+        except Exception as exc:
+            pricing_error = str(exc)
     return LootImportSummary(
         import_id=import_id,
         parsed_item_count=len(items),
         accepted_item_count=len(accepted),
         ignored_item_count=ignored_count,
         imported_value_isk=sum(item.total_value_isk for item in accepted),
+        price_refresh=price_refresh,
+        pricing_error=pricing_error,
     )
 
 
@@ -244,10 +267,6 @@ def stop_tracking(
         session_id=session_id,
         confirmed_at=(now or datetime.now(timezone.utc)).isoformat(),
     )
-
-
-def normalize_item_name(item_name: str) -> str:
-    return _WHITESPACE.sub(" ", item_name.strip()).casefold()
 
 
 def _parse_line(line: str) -> ParsedLootItem | None:

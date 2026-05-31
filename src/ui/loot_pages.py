@@ -7,6 +7,7 @@ import sqlite3
 import streamlit as st
 
 from src.data.repositories import list_character_rows
+from src.services.loot_pricing_service import loot_price_status, refresh_loot_prices
 from src.services.loot_tracker_service import (
     active_session,
     add_filter,
@@ -34,8 +35,8 @@ def loot_tracker_page(connection: sqlite3.Connection) -> None:
         "Paste cargo blocks repeatedly and track cumulative looted value until you stop the run.",
     )
     st.caption(
-        "Copy items from EVE cargo and paste them here. Loot Tracker is manual and immediate; "
-        "it does not use ESI asset refreshes or require another authorization."
+        "Copy items from EVE cargo and paste them here. Loot Tracker values them from public "
+        "Jita buy orders; it does not use ESI asset refreshes or require another authorization."
     )
 
     session = active_session(connection)
@@ -73,7 +74,7 @@ def _active_panel(connection: sqlite3.Connection, session: dict[str, object]) ->
     section_header("Active Tracking Run", "Each paste adds another cargo batch to the running total.")
     c1, c2, c3 = st.columns(3)
     with c1:
-        metric_card("Total Looted Value", format_isk(total_value), "cumulative pasted cargo", icon="ISK")
+        metric_card("Total Looted Value", format_isk(total_value), "Jita buy valuation", icon="ISK")
     with c2:
         metric_card("Tracked Items", f"{len(items):,}", "unique item names", icon="ITM")
     with c3:
@@ -90,6 +91,7 @@ def _active_panel(connection: sqlite3.Connection, session: dict[str, object]) ->
         badge_tone="success",
     )
 
+    _price_panel(connection, session_id=session_id)
     _paste_panel(connection, session_id=session_id)
     _current_items_panel(connection, session_id=session_id, items=items)
     _imports_panel(imports)
@@ -144,12 +146,38 @@ def _paste_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
         else:
             message = (
                 f"Added {summary.accepted_item_count:,} item row(s) from paste "
-                f"{summary.import_id}. Value: {format_isk(summary.imported_value_isk)}."
+                f"{summary.import_id}."
             )
             if summary.ignored_item_count:
                 message += f" Ignored by filters: {summary.ignored_item_count:,}."
-            st.success(message)
+            if summary.pricing_error:
+                st.warning(
+                    f"{message} Cargo was saved, but automatic pricing could not refresh: "
+                    f"{summary.pricing_error}"
+                )
+            else:
+                st.success(f"{message} Jita buy values refreshed.")
             st.rerun()
+
+
+def _price_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
+    action, status = st.columns([1.4, 5])
+    if action.button("Refresh Prices", key=f"loot_refresh_prices_{session_id}"):
+        try:
+            refresh_loot_prices(connection, session_id=session_id, force_refresh=True)
+        except Exception as exc:
+            st.error(f"Unable to refresh Jita buy prices: {exc}")
+        else:
+            st.rerun()
+
+    summary = loot_price_status(connection, session_id=session_id)
+    caption = (
+        "Automatic valuation uses Jita buy orders. "
+        "When no Jita buy order exists, the row is marked Estimated."
+    )
+    if summary.priced_at:
+        caption += f" Prices cached for five minutes. Oldest active market price: {summary.priced_at}."
+    status.caption(caption)
 
 
 def _current_items_panel(
@@ -158,7 +186,7 @@ def _current_items_panel(
     session_id: int,
     items: list[dict[str, object]],
 ) -> None:
-    section_header("Cumulative Loot", "Adjust values, remove a row, or filter it from future pastes.")
+    section_header("Cumulative Loot", "Edit quantities, remove a row, or filter it from future pastes.")
     if not items:
         st.info("No loot items added yet. Paste cargo to begin tracking.")
         return
@@ -182,15 +210,9 @@ def _current_items_panel(
             label_visibility="collapsed",
             key=f"loot_quantity_{session_id}_{item_id}_{item['updated_at']}",
         )
-        unit_value = columns[2].number_input(
-            "Unit value",
-            min_value=0.0,
-            value=float(item["unit_value_isk"]),
-            step=1_000.0,
-            label_visibility="collapsed",
-            key=f"loot_unit_value_{session_id}_{item_id}_{item['updated_at']}",
-        )
-        columns[3].markdown(format_isk(int(quantity) * float(unit_value)))
+        unit_value = float(item["unit_value_isk"])
+        columns[2].markdown(format_isk(unit_value))
+        columns[3].markdown(format_isk(int(quantity) * unit_value))
         columns[4].caption(str(item["price_source"]))
         if columns[5].button(
             "X",
@@ -206,15 +228,13 @@ def _current_items_panel(
         ):
             exclude_item(connection, session_id=session_id, item_id=item_id)
             st.rerun()
-        if int(quantity) != int(item["quantity"]) or float(unit_value) != float(
-            item["unit_value_isk"]
-        ):
+        if int(quantity) != int(item["quantity"]):
             update_item(
                 connection,
                 session_id=session_id,
                 item_id=item_id,
                 quantity=int(quantity),
-                unit_value_isk=float(unit_value),
+                unit_value_isk=unit_value,
             )
             st.rerun()
 
@@ -262,7 +282,6 @@ def _imports_panel(imports: list[dict[str, object]]) -> None:
                 "Parsed Rows": row["parsed_item_count"],
                 "Accepted Rows": row["accepted_item_count"],
                 "Filtered Rows": row["ignored_item_count"],
-                "Imported Value": row["imported_value_isk"],
             }
             for row in imports
         ],
@@ -273,7 +292,6 @@ def _imports_panel(imports: list[dict[str, object]]) -> None:
             "Parsed Rows": st.column_config.NumberColumn("Parsed Rows", format="%d"),
             "Accepted Rows": st.column_config.NumberColumn("Accepted Rows", format="%d"),
             "Filtered Rows": st.column_config.NumberColumn("Filtered Rows", format="%d"),
-            "Imported Value": st.column_config.NumberColumn("Imported Value", format="%.0f ISK"),
         },
     )
 

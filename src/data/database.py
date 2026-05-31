@@ -250,6 +250,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS loot_item_price_cache (
+            normalized_name TEXT PRIMARY KEY,
+            item_name TEXT NOT NULL,
+            type_id INTEGER,
+            unit_value_isk REAL NOT NULL DEFAULT 0,
+            price_source TEXT NOT NULL DEFAULT 'Unpriced',
+            priced_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_loot_sessions_status_started
         ON loot_sessions(status, started_at DESC);
 

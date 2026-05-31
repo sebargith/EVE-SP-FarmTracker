@@ -93,4 +93,4 @@ def test_clipboard_loot_tables_migrate_existing_loot_items() -> None:
     }
 
     assert "normalized_name" in item_columns
-    assert {"loot_imports", "loot_excluded_items"} <= tables
+    assert {"loot_imports", "loot_excluded_items", "loot_item_price_cache"} <= tables

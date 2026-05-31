@@ -1478,12 +1478,25 @@ def list_loot_session_items(
 ) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
-        SELECT id, session_id, type_id, item_name, normalized_name, quantity,
-               unit_value_isk, total_value_isk, price_source, included,
-               item_source, updated_at
+        SELECT
+            loot_session_items.id,
+            loot_session_items.session_id,
+            loot_session_items.type_id,
+            loot_session_items.item_name,
+            loot_session_items.normalized_name,
+            loot_session_items.quantity,
+            loot_session_items.unit_value_isk,
+            loot_session_items.total_value_isk,
+            loot_session_items.price_source,
+            loot_session_items.included,
+            loot_session_items.item_source,
+            loot_session_items.updated_at,
+            loot_item_price_cache.priced_at AS market_priced_at
         FROM loot_session_items
-        WHERE session_id = ?
-        ORDER BY total_value_isk DESC, item_name
+        LEFT JOIN loot_item_price_cache
+            ON loot_item_price_cache.normalized_name = loot_session_items.normalized_name
+        WHERE loot_session_items.session_id = ?
+        ORDER BY loot_session_items.total_value_isk DESC, loot_session_items.item_name
         """,
         (int(session_id),),
     ).fetchall()
@@ -1560,7 +1573,7 @@ def record_clipboard_loot_import(
     for item in items:
         existing = connection.execute(
             """
-            SELECT id, quantity, unit_value_isk
+            SELECT id, quantity, unit_value_isk, price_source
             FROM loot_session_items
             WHERE session_id = ? AND normalized_name = ?
             LIMIT 1
@@ -1575,6 +1588,11 @@ def record_clipboard_loot_import(
                 if incoming_unit_value > 0
                 else float(existing["unit_value_isk"])
             )
+            price_source = (
+                str(item["price_source"])
+                if incoming_unit_value > 0
+                else str(existing["price_source"])
+            )
             connection.execute(
                 """
                 UPDATE loot_session_items
@@ -1588,7 +1606,7 @@ def record_clipboard_loot_import(
                     quantity,
                     unit_value,
                     quantity * unit_value,
-                    str(item["price_source"]),
+                    price_source,
                     recorded_at,
                     int(existing["id"]),
                 ),
@@ -1747,6 +1765,93 @@ def remove_loot_excluded_item(
     connection.execute(
         "DELETE FROM loot_excluded_items WHERE normalized_name = ?",
         (normalized_name,),
+    )
+    connection.commit()
+
+
+def list_loot_item_price_cache(
+    connection: sqlite3.Connection,
+    *,
+    normalized_names: list[str] | tuple[str, ...],
+) -> list[dict[str, Any]]:
+    if not normalized_names:
+        return []
+
+    placeholders = ",".join("?" for _ in normalized_names)
+    rows = connection.execute(
+        f"""
+        SELECT normalized_name, item_name, type_id, unit_value_isk,
+               price_source, priced_at
+        FROM loot_item_price_cache
+        WHERE normalized_name IN ({placeholders})
+        ORDER BY item_name
+        """,
+        tuple(str(name) for name in normalized_names),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_loot_item_price_cache(
+    connection: sqlite3.Connection,
+    *,
+    items: list[dict[str, Any]],
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO loot_item_price_cache (
+            normalized_name, item_name, type_id, unit_value_isk,
+            price_source, priced_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(normalized_name) DO UPDATE SET
+            item_name = excluded.item_name,
+            type_id = excluded.type_id,
+            unit_value_isk = excluded.unit_value_isk,
+            price_source = excluded.price_source,
+            priced_at = excluded.priced_at
+        """,
+        [
+            (
+                str(item["normalized_name"]),
+                str(item["item_name"]),
+                int(item["type_id"]) if item.get("type_id") is not None else None,
+                float(item["unit_value_isk"]),
+                str(item["price_source"]),
+                str(item["priced_at"]),
+            )
+            for item in items
+        ],
+    )
+    connection.commit()
+
+
+def apply_loot_item_prices(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    items: list[dict[str, Any]],
+) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    connection.executemany(
+        """
+        UPDATE loot_session_items
+        SET type_id = ?, normalized_name = ?, unit_value_isk = ?,
+            total_value_isk = ?, price_source = ?, updated_at = ?
+        WHERE session_id = ? AND id = ?
+        """,
+        [
+            (
+                int(item["type_id"]) if item.get("type_id") is not None else None,
+                str(item["normalized_name"]),
+                float(item["unit_value_isk"]),
+                int(item["quantity"]) * float(item["unit_value_isk"]),
+                str(item["price_source"]),
+                timestamp,
+                int(session_id),
+                int(item["id"]),
+            )
+            for item in items
+        ],
     )
     connection.commit()
 

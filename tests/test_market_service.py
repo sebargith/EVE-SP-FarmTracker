@@ -1,3 +1,7 @@
+import json
+
+import httpx
+
 from src.data.database import connect, initialize_database
 from src.data.repositories import (
     add_account,
@@ -7,6 +11,7 @@ from src.data.repositories import (
     replace_character_assets,
 )
 from src.integrations.esi_public import (
+    EsiPublicClient,
     JITA_4_4_STATION_ID,
     LARGE_SKILL_INJECTOR_TYPE_ID,
     PLEX_TYPE_ID,
@@ -72,6 +77,28 @@ class FakeMarketClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+def test_public_client_resolves_inventory_type_names() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/latest/universe/ids/"
+        assert json.loads(request.content) == ["Carbon", "Metal Scraps"]
+        return httpx.Response(
+            200,
+            json={
+                "inventory_types": [
+                    {"id": 2016, "name": "Carbon"},
+                    {"id": 15331, "name": "Metal Scraps"},
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        client = EsiPublicClient(client=http_client)
+        assert client.resolve_inventory_type_ids(["Metal Scraps", "Carbon", "Carbon"]) == {
+            "Carbon": 2016,
+            "Metal Scraps": 15331,
+        }
 
 
 def test_summarize_market_orders_uses_jita_best_buy_and_sell() -> None:
