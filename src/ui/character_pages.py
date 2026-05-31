@@ -32,6 +32,7 @@ from src.data.repositories import (
     list_assets_by_type,
     list_character_skills,
     list_groups,
+    list_recent_sync_runs,
     list_skill_queue_entries,
     list_sp_snapshots,
     latest_wallet_snapshot,
@@ -58,7 +59,12 @@ from src.services.character_service import (
     progress_to_dataframe,
     summarize_progress,
 )
-from src.services.esi_sync_service import import_authorized_character, sync_character_from_token_row
+from src.services.esi_sync_service import (
+    import_authorized_character,
+    list_sync_health,
+    sync_character_from_token_row,
+    sync_due_authorized_characters,
+)
 from src.services.sp_tracking_service import (
     analytics_dataframe,
     alerts_dataframe,
@@ -94,6 +100,7 @@ def characters_page(
     """Render the character SP progression tab."""
 
     _handle_sso_callback(connection)
+    _auto_sync_stale_characters(connection)
 
     progress = list_character_progress(connection, training)
     farm_summary = summarize_progress(progress)
@@ -119,6 +126,12 @@ def characters_page(
         "Progression, queue health, and snapshot trend signals.",
     )
     _sp_command_metrics(sp_summary, tracking_df, alerts)
+
+    section_header(
+        "Sync Diagnostics",
+        "Authorized character health, queue coverage, and SP at risk before the next sync.",
+    )
+    _sync_health_panel(connection)
 
     main_col, side_col = st.columns([2.45, 1], gap="large")
     with main_col:
@@ -844,6 +857,91 @@ def _severity_tone(severity: str) -> str:
     return "neutral"
 
 
+def _auto_sync_stale_characters(connection: sqlite3.Connection) -> None:
+    if st.session_state.get("eve_auto_sync_checked"):
+        return
+    st.session_state["eve_auto_sync_checked"] = True
+
+    config = load_sso_config()
+    if not config.is_configured:
+        return
+
+    summary = sync_due_authorized_characters(connection, config=config)
+    if summary.attempted:
+        st.session_state["eve_auto_sync_summary"] = (
+            f"Auto-sync checked {summary.attempted} character(s): "
+            f"{summary.successful} healthy, {summary.partial} partial, {summary.failed} failed."
+        )
+
+
+def _sync_health_panel(connection: sqlite3.Connection) -> None:
+    summary = st.session_state.get("eve_auto_sync_summary")
+    if summary:
+        st.caption(str(summary))
+
+    health_rows = list_sync_health(connection)
+    if not health_rows:
+        st.info("No authorized EVE SSO characters yet.")
+        return
+
+    table = pd.DataFrame(
+        [
+            {
+                "Group": row.group_name,
+                "Account": row.account_name,
+                "Character": row.character_name,
+                "Health": row.health,
+                "Training": row.training_state,
+                "Token": row.token_status,
+                "Last Sync": row.last_sync_at,
+                "Last Success": row.last_successful_sync_at,
+                "Last Failure": row.last_failure_at,
+                "Next Sync": row.next_recommended_sync_at,
+                "Queue Coverage Hours": row.queue_coverage_hours,
+                "SP At Risk": row.sp_at_risk_before_next_sync,
+                "Missing Scopes": ", ".join(row.missing_scopes) or "none",
+                "Failed Endpoints": ", ".join(row.failed_endpoints) or "none",
+            }
+            for row in health_rows
+        ]
+    )
+    st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Queue Coverage Hours": st.column_config.NumberColumn(
+                "Queue Coverage Hours",
+                format="%.1f",
+            ),
+            "SP At Risk": st.column_config.NumberColumn("SP At Risk", format="%d SP"),
+        },
+    )
+
+    recent_runs = list_recent_sync_runs(connection, limit=10)
+    with st.expander("Recent Sync Runs", expanded=False):
+        if not recent_runs:
+            st.info("No sync runs have been recorded yet.")
+        else:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Character": row["character_name"],
+                            "Trigger": row["trigger"],
+                            "Status": row["status"],
+                            "Started": row["started_at"],
+                            "Completed": row["completed_at"],
+                            "Error": row["error_message"] or "",
+                        }
+                        for row in recent_runs
+                    ]
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+
 def _handle_sso_callback(connection: sqlite3.Connection) -> None:
     query_params = st.query_params
     authorization_code = query_params.get("code")
@@ -970,7 +1068,12 @@ def _sso_panel(connection: sqlite3.Connection) -> None:
             successes = 0
             for token in tokens:
                 try:
-                    sync_character_from_token_row(connection, token_row=token, config=config)
+                    sync_character_from_token_row(
+                        connection,
+                        token_row=token,
+                        config=config,
+                        trigger="manual_all",
+                    )
                     successes += 1
                 except Exception as exc:
                     st.error(f"Sync failed for {token['character_name']}: {exc}")
@@ -979,13 +1082,34 @@ def _sso_panel(connection: sqlite3.Connection) -> None:
                 st.rerun()
 
         for token in tokens:
-            if st.button(
-                f"Forget SSO for {token['character_name']}",
-                key=f"delete_token_{token['id']}",
-            ):
-                delete_api_token(connection, token_id=int(token["id"]))
-                st.success("Stored EVE SSO token removed.")
-                st.rerun()
+            sync_col, forget_col = st.columns(2)
+            with sync_col:
+                if st.button(
+                    f"Sync Now: {token['character_name']}",
+                    key=f"sync_token_{token['id']}",
+                    width="stretch",
+                ):
+                    try:
+                        result = sync_character_from_token_row(
+                            connection,
+                            token_row=token,
+                            config=config,
+                            trigger="manual_character",
+                        )
+                    except Exception as exc:
+                        st.error(f"Sync failed for {token['character_name']}: {exc}")
+                    else:
+                        st.success(f"{result.character_name}: {result.status}.")
+                        st.rerun()
+            with forget_col:
+                if st.button(
+                    f"Forget SSO: {token['character_name']}",
+                    key=f"delete_token_{token['id']}",
+                    width="stretch",
+                ):
+                    delete_api_token(connection, token_id=int(token["id"]))
+                    st.success("Stored EVE SSO token removed.")
+                    st.rerun()
 
 
 def _sp_update_form(

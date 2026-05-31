@@ -93,6 +93,33 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            character_id INTEGER NOT NULL,
+            trigger TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL DEFAULT 'Running',
+            error_message TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_endpoint_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sync_run_id INTEGER NOT NULL,
+            endpoint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            message TEXT NOT NULL DEFAULT '',
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY(sync_run_id) REFERENCES sync_runs(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sync_runs_character_started
+        ON sync_runs(character_id, started_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_sync_endpoint_results_run
+        ON sync_endpoint_results(sync_run_id);
+
         CREATE TABLE IF NOT EXISTS sso_auth_states (
             state TEXT PRIMARY KEY,
             account_id INTEGER NOT NULL,
