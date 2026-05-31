@@ -36,6 +36,16 @@ character slots, but the app must not enforce a three-character limit. Since
 grouping is local and manual, enforcement would create false validation without
 an ESI source of truth.
 
+The app must provide the manual workflow needed to manage this explicitly:
+
+- create, rename, and organize local account groups;
+- create, rename, and organize local accounts;
+- choose the target local account when authorizing a character through SSO;
+- move a character to another local account after authorization;
+- show a clear `Locally assigned` label instead of implying ESI verification;
+- display three primary character slots per account and handle overflow rows
+  gracefully without blocking them.
+
 Official reference:
 [EVE SSO documentation](https://developers.eveonline.com/docs/services/sso/).
 
@@ -67,6 +77,8 @@ Official reference:
 - Wallet and asset data exist per character but do not yet have a dedicated
   overview.
 - Account grouping exists but does not yet have a focused account inspector.
+- Local account creation and SSO attachment exist, but character reassignment
+  and explicit `Locally assigned` labeling still need to be added.
 - The first `SP Overview` screen is dashboard-like but not yet the final main
   dashboard.
 
@@ -81,6 +93,9 @@ Official reference:
   character assets, but ESI does not expose an account-level PLEX Vault
   endpoint.
 - Dedicated wallet overview with ISK and PLEX totals by character and account.
+- Training efficiency advisor for attributes, implants, and remaps.
+- Dedicated Data Confidence Center left-navigation view.
+- Account-level economics with output, recurring cost, and expected profit.
 - Final visual redesign and responsive layout pass.
 
 ## Implementation Roadmap
@@ -124,7 +139,12 @@ Scope:
 - Add an account inspector grouped as `Account Group -> Account -> Character`.
 - Design each account panel around three visible character slots while
   allowing overflow gracefully.
-- Keep character-to-account assignment editable.
+- Add controls to create, rename, and organize local account groups and
+  accounts.
+- Keep character-to-account assignment editable after authorization.
+- Add a move-character workflow for correcting local account assignments.
+- Label account membership as `Locally assigned`; do not imply ESI
+  verification.
 - Add a manual account-level PLEX Vault field with updated-at timestamp and
   notes.
 - Show account Omega status, MCT slots, active queues, queue issues, wallet
@@ -135,11 +155,37 @@ Acceptance criteria:
 
 - A user can inspect one account and its characters without opening each
   character separately.
+- A user can assign and move authorized characters between local accounts.
 - The app never claims that ESI verified account membership.
 - The layout remains readable if a local account contains more than three
   character rows.
 
-### Phase 3: Wallet And SP Performance Overview
+### Phase 3: Training Efficiency Advisor
+
+Goal: turn structured skills, attributes, and implants into practical training
+decisions.
+
+Scope:
+
+- Compare each queued skill against the character's effective attributes.
+- Show primary and secondary attributes for the active skill and queue rows.
+- Show current SP/minute and projected SP/month for the active training plan.
+- Estimate the SP gain or loss from alternative attribute distributions.
+- Identify implant changes worth reviewing.
+- Show available remap information and explain when a remap deserves manual
+  review.
+- Avoid automatic remap recommendations when the future queue is too short or
+  incomplete to support a reliable conclusion.
+
+Acceptance criteria:
+
+- A character inspector explains why the active skill trains at its current
+  rate.
+- The advisor separates measured data, calculated projections, and manual
+  decisions.
+- Advice always identifies the queue horizon used for the comparison.
+
+### Phase 4: Wallet, SP Performance, And Account Economics
 
 Goal: make the first screen the useful daily dashboard.
 
@@ -151,6 +197,11 @@ Scope:
 - Add account and character tables with projected monthly SP per character.
 - Add wallet overview with ISK and tracked loose PLEX per character.
 - Add account totals including manual PLEX Vault values.
+- Add account-level economics: projected monthly SP, injector output, recurring
+  Omega and MCT costs, extractor assumptions, expected revenue, and expected
+  profit.
+- Make account economics traceable to the active market snapshot and manual
+  assumptions.
 - Add snapshot trend charts and expected-versus-observed SP deltas.
 - Add freshness badges for ESI, market, and manual values.
 
@@ -159,8 +210,34 @@ Acceptance criteria:
 - The first screen answers: who is training, who needs attention, what is the
   projected SP output, and how current is the data?
 - Wallet and PLEX values always identify their source and freshness.
+- Account-level profit is labeled as a projection under current assumptions.
 
-### Phase 4: Farming And Extraction Refinement
+### Phase 5: Data Confidence Center
+
+Goal: make stale or incomplete data visible before it influences decisions.
+
+Scope:
+
+- Add `Data Confidence` as a dedicated left-navigation view.
+- Show EVE SSO token health and the last successful sync per character.
+- Show endpoint-level status for skills, queues, attributes, implants, wallet,
+  and assets.
+- Show stale SP snapshots, stale market snapshots, and manual values due for
+  review.
+- Group failures by account and character.
+- Provide the next practical action: reconnect SSO, retry sync, refresh market
+  data, or review a manual value.
+- Reuse the existing granular ESI diagnostics instead of duplicating sync
+  state in the UI.
+
+Acceptance criteria:
+
+- A user can distinguish healthy, stale, partial, and failed data sources.
+- Dashboard warnings link conceptually to a detailed Data Confidence view.
+- Financial projections surface stale-price warnings rather than silently
+  treating old values as current.
+
+### Phase 6: Farming And Extraction Refinement
 
 Goal: keep farming powerful but clearly secondary to SP tracking.
 
@@ -180,14 +257,15 @@ Acceptance criteria:
 - Every profitability recommendation shows the prices, discounts, fees,
   source timestamps, and manual assumptions used.
 
-### Phase 5: UI Refactor Before Final Redesign
+### Phase 7: UI Refactor Before Final Redesign
 
 Goal: reduce Streamlit UI coupling before investing in visual polish.
 
 Scope:
 
 - Split `src/ui/character_pages.py` into focused modules for dashboard,
-  accounts, character inspector, wallet, extraction, and SSO controls.
+  accounts, character inspector, wallet, data confidence, extraction, and SSO
+  controls.
 - Keep services independent from Streamlit.
 - Consolidate reusable KPI cards, badges, panel headers, tables, and freshness
   labels.
@@ -200,14 +278,15 @@ Acceptance criteria:
 - Business calculations and persistence stay outside UI modules.
 - Existing functional tests remain green.
 
-### Phase 6: Visual Redesign
+### Phase 8: Visual Redesign
 
 Goal: converge on the reference-image style without changing product behavior.
 
 Prompt 1 - Application shell:
 
 - Refine the persistent left rail, compact header, active-navigation state,
-  scenario preset area, refresh state, and consistent panel styling.
+  scenario preset area, Data Confidence entry, refresh state, and consistent
+  panel styling.
 - Establish desktop density and a deliberate narrower-screen fallback.
 
 Prompt 2 - Main dashboard:
@@ -232,7 +311,28 @@ Acceptance criteria:
 - No text overlaps, clipped controls, blank panels, or unreadable tables remain
   in the validated viewports.
 
-## Proposed Features
+## Accepted Features
+
+These features are committed roadmap scope:
+
+1. Training efficiency advisor
+
+   Compare queued skills against current attributes and implants. Highlight
+   slower skills, estimate avoidable SP loss, and identify when an implant or
+   remap decision deserves review. Planned in Phase 3.
+
+2. Data Confidence Center
+
+   Add a dedicated left-navigation view for SSO token health, endpoint
+   failures, stale snapshots, stale market prices, and manual values that need
+   review. Planned in Phase 5.
+
+3. Account-level economics
+
+   Attribute projected SP output, injector output, recurring cost, expected
+   revenue, and expected profit to each local account. Planned in Phase 4.
+
+## Additional Feature Candidates
 
 ### High Value
 
@@ -241,50 +341,34 @@ Acceptance criteria:
    Show the remaining queue duration, the next gap, and a configurable warning
    horizon. This directly prevents lost training time.
 
-2. Training efficiency advisor
-
-   Compare the active queue against current attributes and implants. Highlight
-   slower skills, estimate avoidable SP loss, and identify when a remap or
-   implant change is worth reviewing.
-
-3. Extraction readiness calendar
+2. Extraction readiness calendar
 
    Forecast when each character crosses the next 500k SP boundary and aggregate
    expected injectors by week and month.
 
-4. Data confidence center
-
-   Show SSO token health, endpoint failures, stale snapshots, stale market
-   prices, and manual fields that need review in one place.
-
-5. Account economics
-
-   Attribute projected SP output, injector output, recurring cost, and expected
-   profit to each local account so underperforming setups are obvious.
-
 ### Useful Later
 
-6. Actual-versus-projected history
+3. Actual-versus-projected history
 
    Compare observed SP growth and realized extraction revenue against plans.
    This catches queue downtime and optimistic assumptions.
 
-7. Market execution presets
+4. Market execution presets
 
    Separate immediate buy-order sales from posted sell-order assumptions.
    Store editable taxes, broker fees, and expected slippage.
 
-8. Backup and export
+5. Backup and export
 
    Add a local database backup action and CSV exports for characters, wallets,
    snapshots, extraction events, and scenario results.
 
-9. Static-data refresh workflow
+6. Static-data refresh workflow
 
    Add a manual refresh action and visible SDE version so skill and implant
    metadata can be updated deliberately.
 
-10. Local scheduled sync
+7. Local scheduled sync
 
    Add an opt-in local background sync path after the dashboard workflow is
    stable. Respect ESI rate limits, cache responses, and surface the last
