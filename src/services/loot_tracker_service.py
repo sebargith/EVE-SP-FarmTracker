@@ -1,302 +1,347 @@
-"""Multi-character loot tracking from explicit before and after asset snapshots."""
+"""Clipboard-driven loot tracking for explicit player-controlled activity windows."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
 
 from src.data.repositories import (
-    add_manual_loot_item,
-    confirm_loot_session as persist_confirm_loot_session,
-    create_loot_session,
+    add_loot_excluded_item,
+    complete_clipboard_loot_session,
+    create_clipboard_loot_session,
+    delete_clipboard_loot_item,
+    get_active_clipboard_loot_session,
     get_loot_session,
-    get_open_loot_session,
-    list_api_tokens,
-    list_loot_asset_diff_by_type,
-    list_loot_end_holders_by_type,
-    list_loot_session_characters,
+    list_clipboard_loot_imports,
+    list_loot_excluded_items,
     list_loot_session_items,
     list_loot_sessions,
-    replace_character_assets,
-    replace_loot_asset_diff_items,
-    replace_loot_end_snapshots,
-    update_loot_session_items,
-)
-from src.integrations.esi_public import EsiPublicClient, fetch_inventory_type_names
-from src.integrations.sso import SsoConfig
-from src.services.authorized_asset_service import (
-    ASSETS_SCOPE,
-    fetch_assets_from_stored_authorization,
+    record_clipboard_loot_import,
+    remove_loot_excluded_item,
+    update_clipboard_loot_item,
 )
 
 
-ASSET_CACHE_MAX_SECONDS = 3600
+_HEADER_NAMES = frozenset(("item", "item name", "name", "type"))
+_NUMBER_CHARS = re.compile(r"[^0-9,.\-]")
+_WHITESPACE = re.compile(r"\s+")
 
 
-def list_authorized_loot_characters(connection: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Return SSO characters whose stored token can read assets."""
+@dataclass(frozen=True)
+class ParsedLootItem:
+    item_name: str
+    normalized_name: str
+    quantity: int
+    unit_value_isk: float
+    total_value_isk: float
+    price_source: str
 
-    return [
-        token
-        for token in list_api_tokens(connection)
-        if ASSETS_SCOPE in str(token["scopes"]).split()
-    ]
+
+@dataclass(frozen=True)
+class LootImportSummary:
+    import_id: int
+    parsed_item_count: int
+    accepted_item_count: int
+    ignored_item_count: int
+    imported_value_isk: float
 
 
 def start_tracking(
     connection: sqlite3.Connection,
     *,
-    config: SsoConfig,
-    character_ids: list[int] | tuple[int, ...],
     notes: str = "",
-    asset_fetcher: Callable[[dict[str, Any], SsoConfig], list[dict[str, Any]]] | None = None,
     now: datetime | None = None,
 ) -> int:
-    """Capture a baseline asset snapshot for selected authorized characters."""
+    """Start one cumulative loot tracking run."""
 
-    if get_open_loot_session(connection):
-        raise ValueError("Finish or confirm the open loot session before starting another.")
-    selected_ids = tuple(dict.fromkeys(int(character_id) for character_id in character_ids))
-    if not selected_ids:
-        raise ValueError("Select at least one authorized character.")
-
-    assets_by_character = _capture_assets(
+    if get_active_clipboard_loot_session(connection):
+        raise ValueError("Stop the active loot tracking run before starting another.")
+    return create_clipboard_loot_session(
         connection,
-        config=config,
-        character_ids=selected_ids,
-        asset_fetcher=asset_fetcher,
-    )
-    recorded_at = (now or datetime.now(timezone.utc)).isoformat()
-    return create_loot_session(
-        connection,
-        assets_by_character=assets_by_character,
-        notes=notes,
-        started_at=recorded_at,
+        notes=notes.strip(),
+        started_at=(now or datetime.now(timezone.utc)).isoformat(),
     )
 
 
-def stop_or_refresh_tracking(
+def import_cargo_text(
     connection: sqlite3.Connection,
     *,
     session_id: int,
-    config: SsoConfig,
-    asset_fetcher: Callable[[dict[str, Any], SsoConfig], list[dict[str, Any]]] | None = None,
-    type_name_resolver: Callable[[list[int] | tuple[int, ...]], dict[int, str]] = fetch_inventory_type_names,
-    market_price_fetcher: Callable[[], dict[int, dict[str, float]]] | None = None,
+    raw_text: str,
+    character_id: int | None = None,
     now: datetime | None = None,
-) -> list[dict[str, Any]]:
-    """Capture an end snapshot, then regenerate editable candidate-loot rows."""
+) -> LootImportSummary:
+    """Parse and add one pasted cargo block to an active tracking run."""
 
-    session = _required_session(connection, session_id=session_id)
-    if session["status"] not in {"Active", "Awaiting Confirmation"}:
-        raise ValueError("Only active or awaiting-confirmation sessions can capture assets.")
-    character_ids = [
-        int(row["character_id"])
-        for row in list_loot_session_characters(connection, session_id=session_id)
-    ]
-    assets_by_character = _capture_assets(
-        connection,
-        config=config,
-        character_ids=tuple(character_ids),
-        asset_fetcher=asset_fetcher,
-    )
-    captured_at = (now or datetime.now(timezone.utc)).isoformat()
-    replace_loot_end_snapshots(
+    _require_active_session(connection, session_id=session_id)
+    items = parse_cargo_text(raw_text)
+    excluded = {
+        str(row["normalized_name"])
+        for row in list_loot_excluded_items(connection)
+    }
+    accepted = [item for item in items if item.normalized_name not in excluded]
+    ignored_count = len(items) - len(accepted)
+    imported_at = (now or datetime.now(timezone.utc)).isoformat()
+    import_id = record_clipboard_loot_import(
         connection,
         session_id=session_id,
-        assets_by_character=assets_by_character,
-        captured_at=captured_at,
+        character_id=character_id,
+        raw_text=raw_text,
+        items=[_item_mapping(item) for item in accepted],
+        parsed_item_count=len(items),
+        ignored_item_count=ignored_count,
+        imported_at=imported_at,
     )
-    return refresh_candidate_items(
-        connection,
-        session_id=session_id,
-        type_name_resolver=type_name_resolver,
-        market_price_fetcher=market_price_fetcher,
-    )
-
-
-def refresh_candidate_items(
-    connection: sqlite3.Connection,
-    *,
-    session_id: int,
-    type_name_resolver: Callable[[list[int] | tuple[int, ...]], dict[int, str]] = fetch_inventory_type_names,
-    market_price_fetcher: Callable[[], dict[int, dict[str, float]]] | None = None,
-) -> list[dict[str, Any]]:
-    """Regenerate asset-diff candidates and estimate their market-average value."""
-
-    diffs = list_loot_asset_diff_by_type(connection, session_id=session_id)
-    type_ids = [int(row["type_id"]) for row in diffs]
-    names = _resolve_names(type_ids, resolver=type_name_resolver)
-    prices = _resolve_prices(fetcher=market_price_fetcher) if type_ids else {}
-    items = []
-    for diff in diffs:
-        type_id = int(diff["type_id"])
-        quantity = int(diff["quantity"])
-        unit_value, source = _reference_value(prices.get(type_id, {}))
-        items.append(
-            {
-                "type_id": type_id,
-                "item_name": names.get(type_id, f"Type {type_id}"),
-                "quantity": quantity,
-                "unit_value_isk": unit_value,
-                "total_value_isk": quantity * unit_value,
-                "price_source": source,
-            }
-        )
-    replace_loot_asset_diff_items(connection, session_id=session_id, items=items)
-    return list_loot_items_with_holders(connection, session_id=session_id)
-
-
-def list_loot_items_with_holders(
-    connection: sqlite3.Connection,
-    *,
-    session_id: int,
-) -> list[dict[str, Any]]:
-    holders: dict[int, list[str]] = {}
-    for row in list_loot_end_holders_by_type(connection, session_id=session_id):
-        holders.setdefault(int(row["type_id"]), []).append(
-            f"{row['character_name']} ({int(row['quantity']):,})"
-        )
-    items = list_loot_session_items(connection, session_id=session_id)
-    for item in items:
-        type_id = item.get("type_id")
-        item["current_holders"] = (
-            ", ".join(holders.get(int(type_id), []))
-            if type_id is not None
-            else "Manual entry"
-        )
-    return items
-
-
-def add_manual_item(
-    connection: sqlite3.Connection,
-    *,
-    session_id: int,
-    item_name: str,
-    quantity: int,
-    unit_value_isk: float,
-) -> int:
-    session = _required_session(connection, session_id=session_id)
-    if session["status"] != "Awaiting Confirmation":
-        raise ValueError("Manual loot items can be added after capturing an end snapshot.")
-    if not item_name.strip():
-        raise ValueError("Item name is required.")
-    if int(quantity) <= 0:
-        raise ValueError("Quantity must be greater than zero.")
-    if float(unit_value_isk) < 0:
-        raise ValueError("Unit value cannot be negative.")
-    return add_manual_loot_item(
-        connection,
-        session_id=session_id,
-        item_name=item_name.strip(),
-        quantity=int(quantity),
-        unit_value_isk=float(unit_value_isk),
+    return LootImportSummary(
+        import_id=import_id,
+        parsed_item_count=len(items),
+        accepted_item_count=len(accepted),
+        ignored_item_count=ignored_count,
+        imported_value_isk=sum(item.total_value_isk for item in accepted),
     )
 
 
-def confirm_tracking(
-    connection: sqlite3.Connection,
-    *,
-    session_id: int,
-    items: list[dict[str, Any]],
-) -> None:
-    session = _required_session(connection, session_id=session_id)
-    if session["status"] != "Awaiting Confirmation":
-        raise ValueError("Capture an end snapshot before confirming loot.")
-    update_loot_session_items(connection, session_id=session_id, items=items)
-    persist_confirm_loot_session(connection, session_id=session_id)
+def parse_cargo_text(raw_text: str) -> list[ParsedLootItem]:
+    """Parse inventory clipboard text into normalized cumulative item rows."""
+
+    if not raw_text.strip():
+        raise ValueError("Paste at least one cargo item.")
+
+    aggregated: dict[str, ParsedLootItem] = {}
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parsed = _parse_line(line)
+        if not parsed:
+            continue
+        existing = aggregated.get(parsed.normalized_name)
+        if not existing:
+            aggregated[parsed.normalized_name] = parsed
+            continue
+        unit_value = parsed.unit_value_isk or existing.unit_value_isk
+        quantity = existing.quantity + parsed.quantity
+        aggregated[parsed.normalized_name] = ParsedLootItem(
+            item_name=parsed.item_name,
+            normalized_name=parsed.normalized_name,
+            quantity=quantity,
+            unit_value_isk=unit_value,
+            total_value_isk=quantity * unit_value,
+            price_source=(
+                parsed.price_source
+                if parsed.unit_value_isk > 0
+                else existing.price_source
+            ),
+        )
+
+    if not aggregated:
+        raise ValueError("No cargo items could be parsed from the pasted text.")
+    return sorted(aggregated.values(), key=lambda item: item.item_name.casefold())
+
+
+def current_items(connection: sqlite3.Connection, *, session_id: int) -> list[dict[str, Any]]:
+    return list_loot_session_items(connection, session_id=session_id)
+
+
+def import_history(connection: sqlite3.Connection, *, session_id: int) -> list[dict[str, Any]]:
+    return list_clipboard_loot_imports(connection, session_id=session_id)
 
 
 def loot_history(connection: sqlite3.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
     return list_loot_sessions(connection, limit=limit)
 
 
-def next_recommended_refresh_at(session: dict[str, Any]) -> str | None:
-    if not session.get("end_snapshot_at"):
-        return None
-    parsed = datetime.fromisoformat(str(session["end_snapshot_at"]).replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return (parsed + timedelta(seconds=ASSET_CACHE_MAX_SECONDS)).isoformat()
+def active_session(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    return get_active_clipboard_loot_session(connection)
 
 
-def _capture_assets(
+def update_item(
     connection: sqlite3.Connection,
     *,
-    config: SsoConfig,
-    character_ids: tuple[int, ...],
-    asset_fetcher: Callable[[dict[str, Any], SsoConfig], list[dict[str, Any]]] | None,
-) -> dict[int, list[dict[str, Any]]]:
-    tokens = {
-        int(token["character_id"]): token
-        for token in list_authorized_loot_characters(connection)
-    }
-    missing = [character_id for character_id in character_ids if character_id not in tokens]
-    if missing:
-        raise ValueError(
-            "Selected characters must be authorized with "
-            f"{ASSETS_SCOPE}: {', '.join(str(character_id) for character_id in missing)}"
-        )
-    fetcher = asset_fetcher or _default_asset_fetcher(connection)
-    assets_by_character = {
-        character_id: list(fetcher(tokens[character_id], config))
-        for character_id in character_ids
-    }
-    for character_id, assets in assets_by_character.items():
-        replace_character_assets(connection, character_id=character_id, assets=assets)
-    return assets_by_character
-
-
-def _default_asset_fetcher(
-    connection: sqlite3.Connection,
-) -> Callable[[dict[str, Any], SsoConfig], list[dict[str, Any]]]:
-    return lambda token_row, config: fetch_assets_from_stored_authorization(
+    session_id: int,
+    item_id: int,
+    quantity: int,
+    unit_value_isk: float,
+) -> None:
+    _require_active_session(connection, session_id=session_id)
+    if int(quantity) < 0:
+        raise ValueError("Quantity cannot be negative.")
+    if float(unit_value_isk) < 0:
+        raise ValueError("Unit value cannot be negative.")
+    update_clipboard_loot_item(
         connection,
-        token_row=token_row,
-        config=config,
+        session_id=session_id,
+        item_id=item_id,
+        quantity=quantity,
+        unit_value_isk=unit_value_isk,
     )
 
 
-def _required_session(connection: sqlite3.Connection, *, session_id: int) -> dict[str, Any]:
+def remove_item(connection: sqlite3.Connection, *, session_id: int, item_id: int) -> None:
+    _require_active_session(connection, session_id=session_id)
+    delete_clipboard_loot_item(connection, session_id=session_id, item_id=item_id)
+
+
+def exclude_item(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    item_id: int,
+) -> None:
+    """Remove one current row and ignore that item name in future paste batches."""
+
+    _require_active_session(connection, session_id=session_id)
+    item = next(
+        (
+            row
+            for row in list_loot_session_items(connection, session_id=session_id)
+            if int(row["id"]) == int(item_id)
+        ),
+        None,
+    )
+    if not item:
+        raise ValueError("Loot item was not found.")
+    normalized_name = str(item.get("normalized_name") or normalize_item_name(str(item["item_name"])))
+    add_loot_excluded_item(
+        connection,
+        normalized_name=normalized_name,
+        item_name=str(item["item_name"]),
+        remove_from_session_id=session_id,
+    )
+
+
+def add_filter(connection: sqlite3.Connection, *, item_name: str, session_id: int | None = None) -> None:
+    if not item_name.strip():
+        raise ValueError("Enter an item name to exclude.")
+    add_loot_excluded_item(
+        connection,
+        normalized_name=normalize_item_name(item_name),
+        item_name=item_name.strip(),
+        remove_from_session_id=session_id,
+    )
+
+
+def remove_filter(connection: sqlite3.Connection, *, normalized_name: str) -> None:
+    remove_loot_excluded_item(connection, normalized_name=normalized_name)
+
+
+def excluded_items(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    return list_loot_excluded_items(connection)
+
+
+def stop_tracking(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    now: datetime | None = None,
+) -> None:
+    _require_active_session(connection, session_id=session_id)
+    complete_clipboard_loot_session(
+        connection,
+        session_id=session_id,
+        confirmed_at=(now or datetime.now(timezone.utc)).isoformat(),
+    )
+
+
+def normalize_item_name(item_name: str) -> str:
+    return _WHITESPACE.sub(" ", item_name.strip()).casefold()
+
+
+def _parse_line(line: str) -> ParsedLootItem | None:
+    columns = [column.strip() for column in line.split("\t")]
+    if len(columns) > 1:
+        item_name = columns[0]
+        if normalize_item_name(item_name) in _HEADER_NAMES:
+            return None
+        quantity = _parse_quantity(columns[1], default=1)
+        total_value = _last_isk_value(columns[2:])
+        return _build_item(item_name, quantity=quantity, total_value_isk=total_value)
+
+    quantity_suffix = re.match(r"^(.*?)\s+[xX]\s*([\d,.\s]+)$", line)
+    if quantity_suffix:
+        return _build_item(
+            quantity_suffix.group(1),
+            quantity=_parse_quantity(quantity_suffix.group(2), default=1),
+        )
+    quantity_prefix = re.match(r"^([\d,.\s]+)\s*[xX]\s+(.+)$", line)
+    if quantity_prefix:
+        return _build_item(
+            quantity_prefix.group(2),
+            quantity=_parse_quantity(quantity_prefix.group(1), default=1),
+        )
+    return _build_item(line, quantity=1)
+
+
+def _build_item(
+    item_name: str,
+    *,
+    quantity: int,
+    total_value_isk: float | None = None,
+) -> ParsedLootItem | None:
+    name = item_name.strip()
+    if not name or quantity <= 0:
+        return None
+    unit_value = float(total_value_isk or 0) / quantity
+    return ParsedLootItem(
+        item_name=name,
+        normalized_name=normalize_item_name(name),
+        quantity=quantity,
+        unit_value_isk=unit_value,
+        total_value_isk=float(total_value_isk or 0),
+        price_source="Pasted estimate" if total_value_isk is not None else "Manual value needed",
+    )
+
+
+def _parse_quantity(value: str, *, default: int) -> int:
+    parsed = _parse_number(value)
+    return max(int(parsed), 0) if parsed is not None else default
+
+
+def _last_isk_value(columns: list[str]) -> float | None:
+    for value in reversed(columns):
+        if "isk" not in value.casefold():
+            continue
+        parsed = _parse_number(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_number(value: str) -> float | None:
+    candidate = _NUMBER_CHARS.sub("", value.replace("\u00a0", " ")).replace(" ", "")
+    if not candidate:
+        return None
+    if "," in candidate and "." in candidate:
+        candidate = candidate.replace(",", "")
+    elif candidate.count(",") > 1:
+        candidate = candidate.replace(",", "")
+    elif "," in candidate:
+        left, right = candidate.split(",", 1)
+        candidate = left + right if len(right) == 3 else left + "." + right
+    try:
+        return float(candidate)
+    except ValueError:
+        return None
+
+
+def _item_mapping(item: ParsedLootItem) -> dict[str, Any]:
+    return {
+        "item_name": item.item_name,
+        "normalized_name": item.normalized_name,
+        "quantity": item.quantity,
+        "unit_value_isk": item.unit_value_isk,
+        "total_value_isk": item.total_value_isk,
+        "price_source": item.price_source,
+    }
+
+
+def _require_active_session(connection: sqlite3.Connection, *, session_id: int) -> dict[str, Any]:
     session = get_loot_session(connection, session_id=session_id)
     if not session:
-        raise ValueError("Loot session was not found.")
+        raise ValueError("Loot tracking run was not found.")
+    if session["status"] != "Active":
+        raise ValueError("Loot tracking run is already closed.")
     return session
-
-
-def _resolve_names(
-    type_ids: list[int],
-    *,
-    resolver: Callable[[list[int] | tuple[int, ...]], dict[int, str]],
-) -> dict[int, str]:
-    try:
-        return resolver(type_ids)
-    except Exception:
-        return {}
-
-
-def _resolve_prices(
-    *,
-    fetcher: Callable[[], dict[int, dict[str, float]]] | None,
-) -> dict[int, dict[str, float]]:
-    if fetcher:
-        try:
-            return fetcher()
-        except Exception:
-            return {}
-    client = EsiPublicClient()
-    try:
-        return client.get_market_prices()
-    except Exception:
-        return {}
-    finally:
-        client.close()
-
-
-def _reference_value(prices: dict[str, float]) -> tuple[float, str]:
-    if prices.get("average_price") is not None:
-        return float(prices["average_price"]), "ESI market average"
-    if prices.get("adjusted_price") is not None:
-        return float(prices["adjusted_price"]), "ESI adjusted price"
-    return 0.0, "Unpriced"

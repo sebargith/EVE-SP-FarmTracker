@@ -66,8 +66,9 @@ Official reference:
   Extractors.
 - Extraction planning, event lifecycle tracking, and post-extraction ESI
   reconciliation.
-- Multi-character Loot Tracker sessions with explicit start, stop, retry, and
-  editable confirmation steps using stored EVE SSO asset permissions.
+- Clipboard-driven Loot Tracker runs with explicit start and stop controls,
+  repeatable cargo pastes, cumulative totals, item removal, and automatic
+  ignore filters.
 - Left navigation rail and an initial EVE-like Streamlit dashboard shell.
 
 ### Partial
@@ -336,10 +337,12 @@ These features are committed roadmap scope:
 
 4. Loot Tracker
 
-   Track explicit multi-character looting windows from before-and-after ESI
-   asset snapshots, exclude transfers between participating characters, and
-   confirm editable candidate loot with market-average or manual values.
-   Implemented as a secondary left-navigation view.
+   Track one explicit global looting run from `Start Tracking` until the user
+   stops it. Accept repeated EVE cargo clipboard pastes, optionally tag each
+   paste to a local character, accumulate item quantities and pasted estimated
+   values, remove individual rows with an `X` action, and persist automatic
+   ignore filters for unwanted items. Implemented as a secondary
+   left-navigation view without ESI asset polling.
 
 ## Additional Feature Candidates
 

@@ -1478,8 +1478,9 @@ def list_loot_session_items(
 ) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
-        SELECT id, session_id, type_id, item_name, quantity, unit_value_isk,
-               total_value_isk, price_source, included, item_source, updated_at
+        SELECT id, session_id, type_id, item_name, normalized_name, quantity,
+               unit_value_isk, total_value_isk, price_source, included,
+               item_source, updated_at
         FROM loot_session_items
         WHERE session_id = ?
         ORDER BY total_value_isk DESC, item_name
@@ -1487,6 +1488,267 @@ def list_loot_session_items(
         (int(session_id),),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_clipboard_loot_session(
+    connection: sqlite3.Connection,
+    *,
+    notes: str = "",
+    started_at: str | None = None,
+) -> int:
+    """Create one global clipboard-driven loot tracking run."""
+
+    recorded_at = started_at or datetime.now(timezone.utc).isoformat()
+    cursor = connection.execute(
+        """
+        INSERT INTO loot_sessions (status, started_at, notes)
+        VALUES ('Active', ?, ?)
+        """,
+        (recorded_at, notes),
+    )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def get_active_clipboard_loot_session(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM loot_sessions
+        WHERE status = 'Active'
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def record_clipboard_loot_import(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    character_id: int | None,
+    raw_text: str,
+    items: list[dict[str, Any]],
+    parsed_item_count: int,
+    ignored_item_count: int,
+    imported_at: str | None = None,
+) -> int:
+    """Persist one pasted cargo block and add accepted quantities to the run."""
+
+    recorded_at = imported_at or datetime.now(timezone.utc).isoformat()
+    imported_value = sum(float(item["total_value_isk"]) for item in items)
+    cursor = connection.execute(
+        """
+        INSERT INTO loot_imports (
+            session_id, character_id, imported_at, raw_text, parsed_item_count,
+            accepted_item_count, ignored_item_count, imported_value_isk
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(session_id),
+            int(character_id) if character_id is not None else None,
+            recorded_at,
+            raw_text,
+            int(parsed_item_count),
+            len(items),
+            int(ignored_item_count),
+            float(imported_value),
+        ),
+    )
+    for item in items:
+        existing = connection.execute(
+            """
+            SELECT id, quantity, unit_value_isk
+            FROM loot_session_items
+            WHERE session_id = ? AND normalized_name = ?
+            LIMIT 1
+            """,
+            (int(session_id), str(item["normalized_name"])),
+        ).fetchone()
+        incoming_unit_value = float(item["unit_value_isk"])
+        if existing:
+            quantity = int(existing["quantity"]) + int(item["quantity"])
+            unit_value = (
+                incoming_unit_value
+                if incoming_unit_value > 0
+                else float(existing["unit_value_isk"])
+            )
+            connection.execute(
+                """
+                UPDATE loot_session_items
+                SET item_name = ?, quantity = ?, unit_value_isk = ?,
+                    total_value_isk = ?, price_source = ?, included = 1,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(item["item_name"]),
+                    quantity,
+                    unit_value,
+                    quantity * unit_value,
+                    str(item["price_source"]),
+                    recorded_at,
+                    int(existing["id"]),
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO loot_session_items (
+                    session_id, type_id, item_name, normalized_name, quantity,
+                    unit_value_isk, total_value_isk, price_source, included,
+                    item_source, updated_at
+                )
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 1, 'Clipboard', ?)
+                """,
+                (
+                    int(session_id),
+                    str(item["item_name"]),
+                    str(item["normalized_name"]),
+                    int(item["quantity"]),
+                    incoming_unit_value,
+                    float(item["total_value_isk"]),
+                    str(item["price_source"]),
+                    recorded_at,
+                ),
+            )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def list_clipboard_loot_imports(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+            loot_imports.id,
+            loot_imports.session_id,
+            loot_imports.character_id,
+            characters.name AS character_name,
+            loot_imports.imported_at,
+            loot_imports.parsed_item_count,
+            loot_imports.accepted_item_count,
+            loot_imports.ignored_item_count,
+            loot_imports.imported_value_isk
+        FROM loot_imports
+        LEFT JOIN characters ON characters.id = loot_imports.character_id
+        WHERE loot_imports.session_id = ?
+        ORDER BY loot_imports.imported_at DESC, loot_imports.id DESC
+        """,
+        (int(session_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_clipboard_loot_item(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    item_id: int,
+    quantity: int,
+    unit_value_isk: float,
+) -> None:
+    connection.execute(
+        """
+        UPDATE loot_session_items
+        SET quantity = ?, unit_value_isk = ?, total_value_isk = ?, updated_at = ?
+        WHERE id = ? AND session_id = ?
+        """,
+        (
+            int(quantity),
+            float(unit_value_isk),
+            int(quantity) * float(unit_value_isk),
+            datetime.now(timezone.utc).isoformat(),
+            int(item_id),
+            int(session_id),
+        ),
+    )
+    connection.commit()
+
+
+def delete_clipboard_loot_item(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    item_id: int,
+) -> None:
+    connection.execute(
+        "DELETE FROM loot_session_items WHERE id = ? AND session_id = ?",
+        (int(item_id), int(session_id)),
+    )
+    connection.commit()
+
+
+def complete_clipboard_loot_session(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    confirmed_at: str | None = None,
+) -> None:
+    recorded_at = confirmed_at or datetime.now(timezone.utc).isoformat()
+    connection.execute(
+        """
+        UPDATE loot_sessions
+        SET status = 'Confirmed', confirmed_at = ?
+        WHERE id = ? AND status = 'Active'
+        """,
+        (recorded_at, int(session_id)),
+    )
+    connection.commit()
+
+
+def list_loot_excluded_items(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT normalized_name, item_name, created_at
+        FROM loot_excluded_items
+        ORDER BY item_name
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_loot_excluded_item(
+    connection: sqlite3.Connection,
+    *,
+    normalized_name: str,
+    item_name: str,
+    remove_from_session_id: int | None = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO loot_excluded_items (normalized_name, item_name, created_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(normalized_name) DO UPDATE SET item_name = excluded.item_name
+        """,
+        (normalized_name, item_name, datetime.now(timezone.utc).isoformat()),
+    )
+    if remove_from_session_id is not None:
+        connection.execute(
+            """
+            DELETE FROM loot_session_items
+            WHERE session_id = ? AND normalized_name = ?
+            """,
+            (int(remove_from_session_id), normalized_name),
+        )
+    connection.commit()
+
+
+def remove_loot_excluded_item(
+    connection: sqlite3.Connection,
+    *,
+    normalized_name: str,
+) -> None:
+    connection.execute(
+        "DELETE FROM loot_excluded_items WHERE normalized_name = ?",
+        (normalized_name,),
+    )
+    connection.commit()
 
 
 def update_loot_session_items(

@@ -57,3 +57,40 @@ def test_extraction_event_lifecycle_columns_migrate_existing_table() -> None:
     } <= columns
     assert event["status"] == "Completed"
     assert event["reconciliation_status"] == "Pending"
+
+
+def test_clipboard_loot_tables_migrate_existing_loot_items() -> None:
+    connection = connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE loot_session_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            type_id INTEGER,
+            item_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            unit_value_isk REAL NOT NULL DEFAULT 0,
+            total_value_isk REAL NOT NULL DEFAULT 0,
+            price_source TEXT NOT NULL DEFAULT 'Unpriced',
+            included INTEGER NOT NULL DEFAULT 1,
+            item_source TEXT NOT NULL DEFAULT 'Asset diff',
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+    initialize_database(connection)
+
+    item_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(loot_session_items)").fetchall()
+    }
+    tables = {
+        row["name"]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+
+    assert "normalized_name" in item_columns
+    assert {"loot_imports", "loot_excluded_items"} <= tables

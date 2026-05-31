@@ -219,6 +219,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             session_id INTEGER NOT NULL,
             type_id INTEGER,
             item_name TEXT NOT NULL,
+            normalized_name TEXT,
             quantity INTEGER NOT NULL,
             unit_value_isk REAL NOT NULL DEFAULT 0,
             total_value_isk REAL NOT NULL DEFAULT 0,
@@ -229,6 +230,26 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(session_id) REFERENCES loot_sessions(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS loot_imports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            character_id INTEGER,
+            imported_at TEXT NOT NULL,
+            raw_text TEXT NOT NULL,
+            parsed_item_count INTEGER NOT NULL DEFAULT 0,
+            accepted_item_count INTEGER NOT NULL DEFAULT 0,
+            ignored_item_count INTEGER NOT NULL DEFAULT 0,
+            imported_value_isk REAL NOT NULL DEFAULT 0,
+            FOREIGN KEY(session_id) REFERENCES loot_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS loot_excluded_items (
+            normalized_name TEXT PRIMARY KEY,
+            item_name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_loot_sessions_status_started
         ON loot_sessions(status, started_at DESC);
 
@@ -237,6 +258,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_loot_session_items_session
         ON loot_session_items(session_id);
+
+        CREATE INDEX IF NOT EXISTS idx_loot_imports_session_imported
+        ON loot_imports(session_id, imported_at DESC);
 
         CREATE TABLE IF NOT EXISTS market_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,6 +319,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
     )
     _ensure_column(connection, "characters", "last_sync_at", "TEXT")
     _ensure_column(connection, "characters", "sync_status", "TEXT NOT NULL DEFAULT 'Manual'")
+    _ensure_column(connection, "loot_session_items", "normalized_name", "TEXT")
     _ensure_column(connection, "market_snapshots", "average_price", "REAL")
     _ensure_column(connection, "market_snapshots", "adjusted_price", "REAL")
     _ensure_column(
