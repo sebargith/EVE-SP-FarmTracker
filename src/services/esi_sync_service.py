@@ -37,6 +37,7 @@ from src.integrations.sso import (
     validate_access_token,
 )
 from src.integrations.token_store import decrypt_refresh_token, encrypt_refresh_token
+from src.services.extraction_service import reconcile_pending_extraction_events
 
 
 SKILLS_SCOPE = "esi-skills.read_skills.v1"
@@ -328,6 +329,29 @@ def sync_character_with_access_token(
                 assets=assets,
             )
         )
+        reconciliation = reconcile_pending_extraction_events(
+            connection,
+            character_id=character_id,
+            esi_total_sp=summary.total_sp,
+        )
+        if reconciliation:
+            reconciliation_status = (
+                "Success" if reconciliation.status == "Match" else "Failed"
+            )
+            _record_endpoint(
+                connection,
+                run_id,
+                "extraction_reconciliation",
+                reconciliation_status,
+                reconciliation.message,
+            )
+            endpoint_results.append(
+                SyncEndpointResult(
+                    endpoint="extraction_reconciliation",
+                    status=reconciliation_status,
+                    message=reconciliation.message,
+                )
+            )
         optional_failed = any(result.status == "Failed" for result in endpoint_results)
         sync_status = "SSO Partial" if optional_failed else "SSO Synced"
         snapshot_recorded = record_character_esi_sync(

@@ -954,21 +954,24 @@ def record_extraction_event(
     realized_profit: float,
     total_sp_before: int,
     total_sp_after: int,
+    status: str = "Completed",
     notes: str = "",
     timestamp: str | None = None,
 ) -> int:
-    """Persist one realized extraction and reset the local SP baseline."""
+    """Persist one extraction event and apply completed events to the SP baseline."""
 
     recorded_at = timestamp or datetime.now(timezone.utc).isoformat()
+    if status not in {"Planned", "Completed"}:
+        raise ValueError("Extraction status must be Planned or Completed.")
     cursor = connection.execute(
         """
         INSERT INTO extraction_events (
             character_id, timestamp, injectors_created, sp_extracted,
             extractor_unit_cost, extractor_total_cost, lsi_sale_unit_price,
             gross_revenue, market_fees, realized_revenue, realized_profit,
-            total_sp_before, total_sp_after, notes
+            total_sp_before, total_sp_after, status, reconciliation_status, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(character_id),
@@ -984,9 +987,171 @@ def record_extraction_event(
             float(realized_profit),
             int(total_sp_before),
             int(total_sp_after),
+            status,
+            "Pending" if status == "Completed" else "Not Due",
             notes,
         ),
     )
+    if status == "Completed":
+        _apply_extraction_sp_baseline(
+            connection,
+            character_id=character_id,
+            total_sp_after=total_sp_after,
+            recorded_at=recorded_at,
+            notes=notes,
+        )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def complete_planned_extraction_event(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+    total_sp_before: int,
+    total_sp_after: int,
+    extractor_unit_cost: float,
+    extractor_total_cost: float,
+    lsi_sale_unit_price: float,
+    gross_revenue: float,
+    market_fees: float,
+    realized_revenue: float,
+    realized_profit: float,
+    notes: str = "",
+    timestamp: str | None = None,
+) -> None:
+    """Transition a planned extraction to completed and reset the SP baseline."""
+
+    recorded_at = timestamp or datetime.now(timezone.utc).isoformat()
+    event = connection.execute(
+        """
+        SELECT character_id, status
+        FROM extraction_events
+        WHERE id = ?
+        """,
+        (int(event_id),),
+    ).fetchone()
+    if not event:
+        raise ValueError("Extraction event was not found.")
+    if event["status"] != "Planned":
+        raise ValueError("Only planned extraction events can be completed.")
+    connection.execute(
+        """
+        UPDATE extraction_events
+        SET timestamp = ?, extractor_unit_cost = ?, extractor_total_cost = ?,
+            lsi_sale_unit_price = ?, gross_revenue = ?, market_fees = ?,
+            realized_revenue = ?, realized_profit = ?, total_sp_before = ?,
+            total_sp_after = ?, status = 'Completed',
+            reconciliation_status = 'Pending', notes = ?
+        WHERE id = ?
+        """,
+        (
+            recorded_at,
+            float(extractor_unit_cost),
+            float(extractor_total_cost),
+            float(lsi_sale_unit_price),
+            float(gross_revenue),
+            float(market_fees),
+            float(realized_revenue),
+            float(realized_profit),
+            int(total_sp_before),
+            int(total_sp_after),
+            notes,
+            int(event_id),
+        ),
+    )
+    _apply_extraction_sp_baseline(
+        connection,
+        character_id=int(event["character_id"]),
+        total_sp_after=total_sp_after,
+        recorded_at=recorded_at,
+        notes=notes,
+    )
+    connection.commit()
+
+
+def get_extraction_event(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM extraction_events
+        WHERE id = ?
+        """,
+        (int(event_id),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_pending_completed_extraction_events(
+    connection: sqlite3.Connection,
+    *,
+    character_id: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM extraction_events
+        WHERE character_id = ?
+          AND status = 'Completed'
+          AND reconciliation_status = 'Pending'
+        ORDER BY timestamp, id
+        """,
+        (int(character_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_extraction_reconciliation(
+    connection: sqlite3.Connection,
+    *,
+    event_ids: list[int] | tuple[int, ...],
+    reconciliation_status: str,
+    esi_total_sp: int,
+    expected_total_sp: int,
+    reconciliation_delta_sp: int,
+    reconciliation_message: str,
+    reconciled_at: str | None = None,
+) -> None:
+    if not event_ids:
+        return
+    if reconciliation_status not in {"Match", "Drift"}:
+        raise ValueError("Reconciliation status must be Match or Drift.")
+    recorded_at = reconciled_at or datetime.now(timezone.utc).isoformat()
+    placeholders = ",".join("?" for _ in event_ids)
+    status_update = ", status = 'Reconciled'" if reconciliation_status == "Match" else ""
+    connection.execute(
+        f"""
+        UPDATE extraction_events
+        SET reconciliation_status = ?, reconciled_at = ?, esi_total_sp = ?,
+            expected_total_sp = ?, reconciliation_delta_sp = ?,
+            reconciliation_message = ?{status_update}
+        WHERE id IN ({placeholders})
+        """,
+        (
+            reconciliation_status,
+            recorded_at,
+            int(esi_total_sp),
+            int(expected_total_sp),
+            int(reconciliation_delta_sp),
+            reconciliation_message,
+            *[int(event_id) for event_id in event_ids],
+        ),
+    )
+    connection.commit()
+
+
+def _apply_extraction_sp_baseline(
+    connection: sqlite3.Connection,
+    *,
+    character_id: int,
+    total_sp_after: int,
+    recorded_at: str,
+    notes: str,
+) -> None:
     connection.execute(
         """
         UPDATE characters
@@ -1002,8 +1167,6 @@ def record_extraction_event(
         """,
         (int(character_id), recorded_at, int(total_sp_after), notes or "Extraction event"),
     )
-    connection.commit()
-    return int(cursor.lastrowid)
 
 
 def list_extraction_events(

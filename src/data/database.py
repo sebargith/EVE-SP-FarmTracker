@@ -214,6 +214,13 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             realized_profit REAL NOT NULL,
             total_sp_before INTEGER NOT NULL,
             total_sp_after INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Completed',
+            reconciliation_status TEXT NOT NULL DEFAULT 'Pending',
+            reconciled_at TEXT,
+            esi_total_sp INTEGER,
+            expected_total_sp INTEGER,
+            reconciliation_delta_sp INTEGER,
+            reconciliation_message TEXT NOT NULL DEFAULT '',
             notes TEXT NOT NULL DEFAULT '',
             FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
         );
@@ -238,6 +245,28 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "market_snapshots",
         "price_source",
         "TEXT NOT NULL DEFAULT 'order_book'",
+    )
+    _ensure_column(
+        connection,
+        "extraction_events",
+        "status",
+        "TEXT NOT NULL DEFAULT 'Completed'",
+    )
+    _ensure_column(
+        connection,
+        "extraction_events",
+        "reconciliation_status",
+        "TEXT NOT NULL DEFAULT 'Pending'",
+    )
+    _ensure_column(connection, "extraction_events", "reconciled_at", "TEXT")
+    _ensure_column(connection, "extraction_events", "esi_total_sp", "INTEGER")
+    _ensure_column(connection, "extraction_events", "expected_total_sp", "INTEGER")
+    _ensure_column(connection, "extraction_events", "reconciliation_delta_sp", "INTEGER")
+    _ensure_column(
+        connection,
+        "extraction_events",
+        "reconciliation_message",
+        "TEXT NOT NULL DEFAULT ''",
     )
     connection.commit()
 

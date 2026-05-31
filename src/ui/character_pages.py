@@ -74,8 +74,11 @@ from src.services.esi_sync_service import (
     sync_due_authorized_characters,
 )
 from src.services.extraction_service import (
+    ExtractionPricingContext,
     ExtractionPlanRow,
     build_extraction_plan,
+    complete_planned_extraction,
+    extraction_pricing_context,
     log_realized_extraction,
     summarize_extraction_plan,
 )
@@ -260,11 +263,13 @@ def farm_extraction_page(
     progress_df = progress_to_dataframe(progress)
     plan = build_extraction_plan(connection, assumptions, progress=progress)
     plan_summary = summarize_extraction_plan(plan)
+    pricing = extraction_pricing_context(connection, assumptions)
 
     section_header(
         "Farm / Extraction Support",
         "Secondary view for extraction readiness after SP tracking flags useful action.",
     )
+    _extraction_pricing_panel(pricing)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         metric_card(
@@ -332,6 +337,7 @@ def farm_extraction_page(
         _log_extraction_form(connection, assumptions, plan)
     with audit_tab:
         _extraction_audit_table(connection)
+        _complete_planned_extraction_form(connection, assumptions)
     with grouped_tab:
         _grouped_character_view(progress)
 
@@ -637,6 +643,10 @@ def _extraction_plan_table(plan: list[ExtractionPlanRow]) -> None:
                     "Fees": row.market_fees,
                     "Extractor Cost": row.extractor_total_cost,
                     "Projected Net": row.projected_profit,
+                    "Price Source": row.pricing_source,
+                    "Price As Of": row.pricing_as_of,
+                    "Price Age Hours": row.pricing_age_hours,
+                    "Price Warning": row.pricing_warning,
                     "Queue Ends": row.queue_ends_at,
                 }
                 for row in plan
@@ -653,8 +663,20 @@ def _extraction_plan_table(plan: list[ExtractionPlanRow]) -> None:
             "Fees": st.column_config.NumberColumn("Fees", format="%.0f ISK"),
             "Extractor Cost": st.column_config.NumberColumn("Extractor Cost", format="%.0f ISK"),
             "Projected Net": st.column_config.NumberColumn("Projected Net", format="%.0f ISK"),
+            "Price Age Hours": st.column_config.NumberColumn("Price Age Hours", format="%.1f"),
         },
     )
+
+
+def _extraction_pricing_panel(pricing: ExtractionPricingContext) -> None:
+    description = f"Price source: {pricing.source}. Freshness: {pricing.freshness}."
+    if pricing.as_of:
+        description += f" Snapshot: {pricing.as_of}."
+    if pricing.warnings:
+        st.warning(description + " " + " ".join(pricing.warnings))
+    else:
+        st.success(description)
+    st.caption(pricing.source_summary)
 
 
 def _log_extraction_form(
@@ -712,13 +734,21 @@ def _log_extraction_form(
         value="",
         key=f"extraction_notes_{selected.character_id}",
     )
+    event_status = st.selectbox(
+        "Event state",
+        ["Completed", "Planned"],
+        help=(
+            "Completed immediately updates the local SP baseline and waits for ESI "
+            "reconciliation. Planned records the intended action without changing SP."
+        ),
+    )
     estimated_net = (
         int(injectors) * float(lsi_price) * (1 - float(fee_pct) / 100)
         - int(injectors) * float(extractor_cost)
     )
     st.caption(f"Estimated realized net: {_format_isk(estimated_net)}")
 
-    if st.button("Record Completed Extraction"):
+    if st.button("Record Extraction Event"):
         try:
             log_realized_extraction(
                 connection,
@@ -729,11 +759,17 @@ def _log_extraction_form(
                 extractor_unit_cost=float(extractor_cost),
                 market_fee_rate=float(fee_pct) / 100,
                 notes=notes,
+                status=event_status,
             )
         except ValueError as exc:
             st.error(str(exc))
         else:
-            st.success("Extraction event recorded and SP baseline updated.")
+            message = (
+                "Completed extraction recorded. SP baseline updated; ESI reconciliation is pending."
+                if event_status == "Completed"
+                else "Planned extraction recorded. SP baseline was not changed."
+            )
+            st.success(message)
             st.rerun()
 
 
@@ -748,6 +784,8 @@ def _extraction_audit_table(connection: sqlite3.Connection) -> None:
             [
                 {
                     "Timestamp": row["timestamp"],
+                    "State": row["status"],
+                    "Reconciliation": row["reconciliation_status"],
                     "Group": row["group_name"],
                     "Account": row["account_name"],
                     "Character": row["character_name"],
@@ -760,6 +798,10 @@ def _extraction_audit_table(connection: sqlite3.Connection) -> None:
                     "Realized Profit": row["realized_profit"],
                     "SP Before": row["total_sp_before"],
                     "SP After": row["total_sp_after"],
+                    "ESI SP": row["esi_total_sp"],
+                    "Expected SP": row["expected_total_sp"],
+                    "Delta SP": row["reconciliation_delta_sp"],
+                    "Reconciliation Detail": row["reconciliation_message"],
                     "Notes": row["notes"],
                 }
                 for row in events
@@ -777,8 +819,83 @@ def _extraction_audit_table(connection: sqlite3.Connection) -> None:
             "Realized Profit": st.column_config.NumberColumn("Realized Profit", format="%.0f ISK"),
             "SP Before": st.column_config.NumberColumn("SP Before", format="%d SP"),
             "SP After": st.column_config.NumberColumn("SP After", format="%d SP"),
+            "ESI SP": st.column_config.NumberColumn("ESI SP", format="%d SP"),
+            "Expected SP": st.column_config.NumberColumn("Expected SP", format="%d SP"),
+            "Delta SP": st.column_config.NumberColumn("Delta SP", format="%d SP"),
         },
     )
+
+
+def _complete_planned_extraction_form(
+    connection: sqlite3.Connection,
+    assumptions: FarmAssumptions,
+) -> None:
+    events = [
+        event
+        for event in list_extraction_events(connection, limit=100)
+        if event["status"] == "Planned"
+    ]
+    if not events:
+        return
+
+    with st.expander("Complete Planned Extraction", expanded=False):
+        labels = {
+            (
+                f"{event['group_name']} / {event['account_name']} / "
+                f"{event['character_name']} - {event['injectors_created']} injector(s)"
+            ): event
+            for event in events
+        }
+        selected = labels[
+            st.selectbox("Planned event", list(labels), key="planned_extraction_event")
+        ]
+        event_id = int(selected["id"])
+        lsi_price = st.number_input(
+            "Completed LSI sale price per unit",
+            min_value=0,
+            value=int(selected["lsi_sale_unit_price"]),
+            step=10_000_000,
+            format="%d",
+            key=f"planned_lsi_price_{event_id}",
+        )
+        extractor_cost = st.number_input(
+            "Completed extractor cost per unit",
+            min_value=0,
+            value=int(selected["extractor_unit_cost"]),
+            step=10_000_000,
+            format="%d",
+            key=f"planned_extractor_cost_{event_id}",
+        )
+        fee_pct = st.number_input(
+            "Completed fees and taxes (%)",
+            min_value=0.0,
+            max_value=99.0,
+            value=_event_fee_pct(selected),
+            step=0.25,
+            format="%.2f",
+            key=f"planned_fee_pct_{event_id}",
+        )
+        notes = st.text_input(
+            "Completed extraction notes",
+            value=str(selected["notes"]),
+            key=f"planned_notes_{event_id}",
+        )
+        if st.button("Mark Planned Extraction Completed"):
+            try:
+                complete_planned_extraction(
+                    connection,
+                    assumptions,
+                    event_id=event_id,
+                    lsi_sale_unit_price=float(lsi_price),
+                    extractor_unit_cost=float(extractor_cost),
+                    market_fee_rate=float(fee_pct) / 100,
+                    notes=notes,
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success("Planned extraction completed. ESI reconciliation is pending.")
+                st.rerun()
 
 
 def _sp_analytics_table(analytics_df: pd.DataFrame) -> None:
@@ -1199,6 +1316,11 @@ def _normalize_expiration(value: str) -> str | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _event_fee_pct(event: dict[str, object]) -> float:
+    gross_revenue = float(event["gross_revenue"])
+    return float(event["market_fees"]) / gross_revenue * 100 if gross_revenue else 0
 
 
 def _format_sp(value: float) -> str:

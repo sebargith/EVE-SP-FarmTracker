@@ -1,10 +1,12 @@
 import os
 from datetime import datetime, timedelta, timezone
 
+from src.calculations.assumptions import load_assumptions
 from src.data.database import connect, initialize_database
 from src.data.repositories import (
     add_account,
     add_account_group,
+    add_character,
     latest_wallet_snapshot,
     list_api_tokens,
     list_assets_by_type,
@@ -24,7 +26,9 @@ from src.services.esi_sync_service import (
     is_token_sync_due,
     list_sync_health,
     summarize_esi_character_data,
+    sync_character_with_access_token,
 )
+from src.services.extraction_service import log_realized_extraction
 
 
 class FakeEsiClient:
@@ -341,3 +345,53 @@ def test_is_token_sync_due_uses_cooldown() -> None:
         now=now,
         stale_after_minutes=60,
     )
+
+
+def test_esi_sync_marks_partial_when_extraction_reconciliation_drifts() -> None:
+    connection = connect(":memory:")
+    initialize_database(connection)
+    group_id = add_account_group(connection, name="Reconciliation Group")
+    account_id = add_account(connection, group_id=group_id, name="Reconciliation Account")
+    character_id = add_character(
+        connection,
+        account_id=account_id,
+        name="Reconciliation Farmer",
+        total_sp=6_100_000,
+        training_rate_sp_min=0,
+    )
+    log_realized_extraction(
+        connection,
+        load_assumptions(),
+        character_id=character_id,
+        injectors_created=1,
+    )
+
+    result = sync_character_with_access_token(
+        connection,
+        character_id=character_id,
+        eve_character_id=987656,
+        character_name="Reconciliation Farmer",
+        access_token="access-token",
+        scopes=(
+            "esi-skills.read_skills.v1",
+            "esi-skills.read_skillqueue.v1",
+            "esi-clones.read_implants.v1",
+        ),
+        client=FakeEsiClient(
+            EsiCharacterData(
+                skills={"total_sp": 5_750_000, "skills": []},
+                skill_queue=[],
+                attributes={},
+                implants=[],
+                assets=[],
+            )
+        ),
+    )
+
+    endpoints = list_sync_endpoint_results(connection, sync_run_id=result.sync_run_id)
+
+    assert result.status == "SSO Partial"
+    assert {
+        row["endpoint"]: row["status"]
+        for row in endpoints
+    }["extraction_reconciliation"] == "Failed"
