@@ -124,6 +124,11 @@ def _paste_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
         help="Optional label for this pasted cargo batch. SSO is not required.",
         key=f"loot_source_character_{session_id}",
     )
+    cargo_version_key = f"loot_cargo_text_version_{session_id}"
+    cargo_version = int(st.session_state.get(cargo_version_key, 0))
+    if cargo_version:
+        st.session_state.pop(f"loot_cargo_text_{session_id}_{cargo_version - 1}", None)
+    cargo_key = f"loot_cargo_text_{session_id}_{cargo_version}"
     cargo_text = st.text_area(
         "Cargo clipboard",
         placeholder=(
@@ -131,7 +136,7 @@ def _paste_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
             "Example: Item Name<TAB>Quantity<TAB>...<TAB>Estimated Price ISK"
         ),
         height=180,
-        key=f"loot_cargo_text_{session_id}",
+        key=cargo_key,
     )
     if st.button("Add Pasted Cargo", type="primary", key=f"loot_add_paste_{session_id}"):
         try:
@@ -157,6 +162,7 @@ def _paste_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
                 )
             else:
                 st.success(f"{message} Jita buy values refreshed.")
+            st.session_state[cargo_version_key] = cargo_version + 1
             st.rerun()
 
 
