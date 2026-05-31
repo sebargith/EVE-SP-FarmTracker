@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 
 import streamlit as st
 
@@ -15,7 +16,6 @@ from src.services.loot_tracker_service import (
     exclude_item,
     excluded_items,
     import_cargo_text,
-    import_history,
     loot_history,
     remove_filter,
     remove_item,
@@ -23,7 +23,7 @@ from src.services.loot_tracker_service import (
     stop_tracking,
     update_item,
 )
-from src.ui.components import detail_panel, metric_card, section_header
+from src.ui.components import section_header
 from src.ui.formatting import format_isk
 
 
@@ -32,11 +32,7 @@ def loot_tracker_page(connection: sqlite3.Connection) -> None:
 
     section_header(
         "Loot Tracker",
-        "Paste cargo blocks repeatedly and track cumulative looted value until you stop the run.",
-    )
-    st.caption(
-        "Copy items from EVE cargo and paste them here. Loot Tracker values them from public "
-        "Jita buy orders; it does not use ESI asset refreshes or require another authorization."
+        "Paste cargo repeatedly and track the total until you stop the session.",
     )
 
     session = active_session(connection)
@@ -50,64 +46,76 @@ def loot_tracker_page(connection: sqlite3.Connection) -> None:
 
 
 def _start_panel(connection: sqlite3.Connection) -> None:
-    section_header("Start Tracking", "Open one cumulative loot run before pasting cargo.")
-    notes = st.text_input(
-        "Tracking notes",
-        placeholder="Optional activity, system, fleet, or character-group note",
-    )
     if st.button("Start Tracking", type="primary"):
         try:
-            session_id = start_tracking(connection, notes=notes)
+            start_tracking(connection)
         except Exception as exc:
             st.error(f"Unable to start loot tracking: {exc}")
         else:
-            st.success(f"Loot tracking run {session_id} started.")
             st.rerun()
+    st.caption("Start one session, paste cargo as you loot, then stop it to save the total.")
 
 
 def _active_panel(connection: sqlite3.Connection, session: dict[str, object]) -> None:
     session_id = int(session["id"])
     items = current_items(connection, session_id=session_id)
-    imports = import_history(connection, session_id=session_id)
     total_value = sum(float(item["total_value_isk"]) for item in items)
 
-    section_header("Active Tracking Run", "Each paste adds another cargo batch to the running total.")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        metric_card("Total Looted Value", format_isk(total_value), "Jita buy valuation", icon="ISK")
-    with c2:
-        metric_card("Tracked Items", f"{len(items):,}", "unique item names", icon="ITM")
-    with c3:
-        metric_card("Cargo Imports", f"{len(imports):,}", "pasted batches", icon="PST")
-
-    detail_panel(
-        f"Tracking Run {session_id}",
-        [
-            ("Status", "Tracking"),
-            ("Started", str(session["started_at"])),
-            ("Notes", str(session.get("notes") or "None")),
-        ],
-        badge="ACTIVE",
-        badge_tone="success",
-    )
-
-    _price_panel(connection, session_id=session_id)
+    _summary_panel(connection, session_id=session_id, total_value=total_value, item_count=len(items))
+    _action_row(connection, session_id=session_id)
     _paste_panel(connection, session_id=session_id)
     _current_items_panel(connection, session_id=session_id, items=items)
-    _imports_panel(imports)
 
-    if st.button("Stop Global Tracking", type="primary"):
+
+def _summary_panel(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    total_value: float,
+    item_count: int,
+) -> None:
+    summary = loot_price_status(connection, session_id=session_id)
+    priced_at = _format_price_time(summary.priced_at)
+    st.markdown(
+        f"""
+        <div class="eve-loot-summary">
+            <div>
+                <div class="eve-loot-total-label">Total Loot Value</div>
+                <div class="eve-loot-total-value">{format_isk(total_value)}</div>
+                <div class="eve-loot-total-subtitle">Jita buy valuation</div>
+            </div>
+            <div class="eve-loot-summary-meta">
+                <span><strong>{item_count:,}</strong> item types</span>
+                <span><strong>{summary.estimated_count:,}</strong> estimated</span>
+                <span>prices: {priced_at}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _action_row(connection: sqlite3.Connection, *, session_id: int) -> None:
+    refresh, stop, description = st.columns([1.15, 1.25, 5])
+    if refresh.button("Refresh Prices", key=f"loot_refresh_prices_{session_id}"):
+        try:
+            refresh_loot_prices(connection, session_id=session_id, force_refresh=True)
+        except Exception as exc:
+            st.error(f"Unable to refresh Jita buy prices: {exc}")
+        else:
+            st.rerun()
+    if stop.button("Stop Session", type="primary"):
         try:
             stop_tracking(connection, session_id=session_id)
         except Exception as exc:
             st.error(f"Unable to stop loot tracking: {exc}")
         else:
-            st.success("Loot tracking run saved.")
             st.rerun()
+    description.caption("Automatic public Jita buy prices. No extra EVE authorization required.")
 
 
 def _paste_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
-    section_header("Paste Cargo", "Paste one or more cargo exports during the active run.")
+    section_header("Add Cargo")
     characters = list_character_rows(connection)
     character_options = {"Unassigned / combined cargo": None}
     character_options.update(
@@ -118,27 +126,25 @@ def _paste_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
             for row in characters
         }
     )
-    selected_character = st.selectbox(
-        "Source character",
-        list(character_options),
-        help="Optional label for this pasted cargo batch. SSO is not required.",
-        key=f"loot_source_character_{session_id}",
-    )
     cargo_version_key = f"loot_cargo_text_version_{session_id}"
     cargo_version = int(st.session_state.get(cargo_version_key, 0))
     if cargo_version:
         st.session_state.pop(f"loot_cargo_text_{session_id}_{cargo_version - 1}", None)
     cargo_key = f"loot_cargo_text_{session_id}_{cargo_version}"
-    cargo_text = st.text_area(
+    source, cargo = st.columns([1.8, 4.2])
+    selected_character = source.selectbox(
+        "Source character",
+        list(character_options),
+        help="Optional local label for this pasted cargo batch.",
+        key=f"loot_source_character_{session_id}",
+    )
+    cargo_text = cargo.text_area(
         "Cargo clipboard",
-        placeholder=(
-            "Paste copied EVE inventory rows here.\n"
-            "Example: Item Name<TAB>Quantity<TAB>...<TAB>Estimated Price ISK"
-        ),
-        height=180,
+        placeholder="Paste copied EVE inventory rows here",
+        height=105,
         key=cargo_key,
     )
-    if st.button("Add Pasted Cargo", type="primary", key=f"loot_add_paste_{session_id}"):
+    if source.button("Count Loot", type="primary", key=f"loot_add_paste_{session_id}"):
         try:
             summary = import_cargo_text(
                 connection,
@@ -166,33 +172,13 @@ def _paste_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
             st.rerun()
 
 
-def _price_panel(connection: sqlite3.Connection, *, session_id: int) -> None:
-    action, status = st.columns([1.4, 5])
-    if action.button("Refresh Prices", key=f"loot_refresh_prices_{session_id}"):
-        try:
-            refresh_loot_prices(connection, session_id=session_id, force_refresh=True)
-        except Exception as exc:
-            st.error(f"Unable to refresh Jita buy prices: {exc}")
-        else:
-            st.rerun()
-
-    summary = loot_price_status(connection, session_id=session_id)
-    caption = (
-        "Automatic valuation uses Jita buy orders. "
-        "When no Jita buy order exists, the row is marked Estimated."
-    )
-    if summary.priced_at:
-        caption += f" Prices cached for five minutes. Oldest active market price: {summary.priced_at}."
-    status.caption(caption)
-
-
 def _current_items_panel(
     connection: sqlite3.Connection,
     *,
     session_id: int,
     items: list[dict[str, object]],
 ) -> None:
-    section_header("Cumulative Loot", "Edit quantities, remove a row, or filter it from future pastes.")
+    section_header("Looted Items")
     if not items:
         st.info("No loot items added yet. Paste cargo to begin tracking.")
         return
@@ -245,6 +231,15 @@ def _current_items_panel(
             st.rerun()
 
 
+def _format_price_time(priced_at: str | None) -> str:
+    if not priced_at:
+        return "pending"
+    try:
+        return f"{datetime.fromisoformat(priced_at):%H:%M} UTC"
+    except ValueError:
+        return "cached"
+
+
 def _filters_panel(connection: sqlite3.Connection, *, session_id: int | None) -> None:
     with st.expander("Automatic Item Filters"):
         st.caption("Filtered item names are ignored automatically in future cargo pastes.")
@@ -274,56 +269,24 @@ def _filters_panel(connection: sqlite3.Connection, *, session_id: int | None) ->
                 st.rerun()
 
 
-def _imports_panel(imports: list[dict[str, object]]) -> None:
-    section_header("Paste History", "Every cargo import remains attached to the active run.")
-    if not imports:
-        st.caption("No cargo batches pasted yet.")
-        return
-    st.dataframe(
-        [
-            {
-                "Paste": row["id"],
-                "Imported": row["imported_at"],
-                "Character": row["character_name"] or "Unassigned / combined cargo",
-                "Parsed Rows": row["parsed_item_count"],
-                "Accepted Rows": row["accepted_item_count"],
-                "Filtered Rows": row["ignored_item_count"],
-            }
-            for row in imports
-        ],
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Paste": st.column_config.NumberColumn("Paste", format="%d"),
-            "Parsed Rows": st.column_config.NumberColumn("Parsed Rows", format="%d"),
-            "Accepted Rows": st.column_config.NumberColumn("Accepted Rows", format="%d"),
-            "Filtered Rows": st.column_config.NumberColumn("Filtered Rows", format="%d"),
-        },
-    )
-
-
 def _history_panel(connection: sqlite3.Connection) -> None:
-    section_header("Loot Tracking History", "Saved global tracking runs and their cumulative totals.")
-    rows = loot_history(connection)
-    if not rows:
-        st.info("No loot tracking runs recorded yet.")
-        return
-    st.dataframe(
-        [
-            {
-                "Run": row["id"],
-                "Status": row["status"],
-                "Started": row["started_at"],
-                "Stopped": row["confirmed_at"],
-                "Loot Value": row["total_value_isk"],
-                "Notes": row["notes"],
-            }
-            for row in rows
-        ],
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Run": st.column_config.NumberColumn("Run", format="%d"),
-            "Loot Value": st.column_config.NumberColumn("Loot Value", format="%.0f ISK"),
-        },
-    )
+    rows = [row for row in loot_history(connection, limit=8) if row["status"] == "Confirmed"]
+    with st.expander("Previous Sessions"):
+        if not rows:
+            st.caption("No completed sessions yet.")
+            return
+        st.dataframe(
+            [
+                {
+                    "Ended": row["confirmed_at"],
+                    "Loot Value": row["total_value_isk"],
+                }
+                for row in rows
+            ],
+            width="stretch",
+            height=min(35 + len(rows) * 35, 245),
+            hide_index=True,
+            column_config={
+                "Loot Value": st.column_config.NumberColumn("Loot Value", format="%.0f ISK"),
+            },
+        )

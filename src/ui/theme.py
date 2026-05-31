@@ -293,6 +293,53 @@ def inject_theme() -> None:
             color: var(--eve-amber);
         }
 
+        .eve-loot-summary {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1.2rem;
+            border: 1px solid rgba(53, 211, 95, 0.26);
+            border-radius: 8px;
+            padding: 0.8rem 1rem;
+            background: linear-gradient(90deg, rgba(8, 30, 32, 0.96), rgba(5, 15, 23, 0.94));
+            box-shadow: inset 3px 0 0 rgba(53, 211, 95, 0.72);
+        }
+
+        .eve-loot-total-label {
+            color: var(--eve-muted);
+            font-size: 0.74rem;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .eve-loot-total-value {
+            color: #f8fafc;
+            font-size: 2rem;
+            font-weight: 850;
+            line-height: 1.05;
+            margin-top: 0.18rem;
+        }
+
+        .eve-loot-total-subtitle {
+            color: var(--eve-green);
+            font-size: 0.78rem;
+            margin-top: 0.18rem;
+        }
+
+        .eve-loot-summary-meta {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+            color: var(--eve-muted);
+            font-size: 0.76rem;
+        }
+
+        .eve-loot-summary-meta strong {
+            color: #dce6f2;
+        }
+
         .eve-badge {
             display: inline-flex;
             align-items: center;
@@ -497,6 +544,15 @@ def inject_theme() -> None:
 
             .eve-kpi {
                 min-height: 5.8rem;
+            }
+
+            .eve-loot-summary {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .eve-loot-summary-meta {
+                justify-content: flex-start;
             }
         }
         </style>
